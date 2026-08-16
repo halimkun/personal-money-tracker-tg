@@ -1,4 +1,8 @@
-"""Upgrade premium — Opsi A: transfer manual + approval admin (PRD §5.3)."""
+"""Upgrade premium — Opsi A: transfer manual + approval admin (PRD §5.3).
+
+Pola UX (PRD §7): prompt kirim bukti adalah pesan BARU; saat foto diterima,
+prompt itu di-edit untuk konfirmasi via `confirm_step`.
+"""
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -15,7 +19,7 @@ from app.services.payments import PaymentService
 from app.services.settings import SettingsService
 from app.texts.id import UPGRADE_CANCEL_HELP
 from app.utils.format import fmt_datetime
-from app.utils.messages import render_step
+from app.utils.messages import confirm_step, render_step
 
 router = Router()
 
@@ -56,10 +60,12 @@ async def cmd_upgrade(message: Message, session, user: User):
 
 @router.callback_query(F.data == "upg:pay")
 async def upg_start(cb: CallbackQuery, state, session, user: User):
+    if await state.get_state():
+        # user sedang di proses lain — jangan bajak state (mis. tombol panel lama)
+        return await cb.answer("Selesaikan proses aktif dulu (/cancel).", show_alert=True)
     svc = SettingsService(session)
     price = await svc.premium_price()
     await state.set_state(UpgradeStates.waiting_proof_photo)
-    await state.update_data(msg_id=None)
     await render_step(
         cb.message.bot, cb.message.chat.id, state,
         f"📤 Transfer sebesar <b>{format_rupiah(price)}</b> sesuai instruksi, lalu "
@@ -86,6 +92,7 @@ async def upg_receive_proof(message: Message, state, session, user: User):
     except ValidationError as e:
         await message.answer(f"⚠️ {e}")
         return
+    await confirm_step(message.bot, message.chat.id, state, "📷 Foto bukti diterima")
     await state.clear()
 
     # Token dibuat PER-ADMIN karena resolve() memvalidasi kepemilikan user_id (PRD §7c)

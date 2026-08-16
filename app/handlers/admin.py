@@ -2,6 +2,9 @@
 
 Keamanan: setiap handler cek `is_admin`; callback token `ap:` juga divalidasi
 ganda (kepemilikan token + admin). Semua perubahan config tercatat di admin_logs.
+
+Pola UX (PRD §7): prompt input admin adalah PESAN BARU; input yang dikirim
+admin ditempel di prompt itu via `confirm_step` sebelum panel di-render ulang.
 """
 
 from aiogram import F, Router
@@ -23,7 +26,7 @@ from app.services.settings import SettingsService
 from app.services.stats import build_stats_text
 from app.services.users import UserService
 from app.utils.format import fmt_datetime, today_local
-from app.utils.messages import edit_or_send, render_step
+from app.utils.messages import confirm_step, edit_or_send, render_step
 
 router = Router()
 
@@ -34,21 +37,14 @@ def is_admin(user_id: int) -> bool:
     return user_id in settings.admin_set
 
 
-def _btn(text: str, cb: str):
-    from aiogram.types import InlineKeyboardButton
-    return InlineKeyboardButton(text=text, callback_data=cb)
-
-
 def _mask_key(key: str) -> str:
     return (key[:4] + "…" + key[-4:]) if len(key) > 8 else ("(ada)" if key else "(kosong)")
 
 
 # ============================== Command =======================================
 
-@router.message(Command("admin"))
-async def cmd_admin(message: Message, session, user: User):
-    if not is_admin(user.telegram_id):
-        return
+async def _render_panel(bot, chat_id: int, message_id: int | None, session):
+    """Panel admin (info) — selalu update pesan di tempat."""
     svc = SettingsService(session)
     lines = [
         "🛠️ <b>Panel Admin</b>",
@@ -66,7 +62,14 @@ async def cmd_admin(message: Message, session, user: User):
         [("🤖 Konfigurasi AI", "adm:setai")],
         [("⚙️ Pengaturan Sistem", "adm:sett")],
     ])
-    await edit_or_send(message.bot, message.chat.id, None, "\n".join(lines), kb)
+    await edit_or_send(bot, chat_id, message_id, "\n".join(lines), kb)
+
+
+@router.message(Command("admin"))
+async def cmd_admin(message: Message, session, user: User):
+    if not is_admin(user.telegram_id):
+        return
+    await _render_panel(message.bot, message.chat.id, None, session)
 
 
 @router.message(Command("stats"))
@@ -97,7 +100,6 @@ async def cmd_broadcast(message: Message, state, user: User):
     if not is_admin(user.telegram_id):
         return
     await state.set_state(BroadcastStates.entering_text)
-    await state.update_data(msg_id=None)
     await render_step(
         message.bot, message.chat.id, state,
         "📢 Kirim teks broadcast (akan dikirim ke semua user aktif). Ketik /cancel untuk batal.",
@@ -137,9 +139,9 @@ async def adm_users(cb: CallbackQuery, session, user: User):
     lines.append(f"\nHal. {page + 1}/{total_pages}")
     nav = []
     if page > 0:
-        nav.append(_btn("◀️", f"adm:users:{page - 1}"))
+        nav.append(("◀️", f"adm:users:{page - 1}"))
     if page < total_pages - 1:
-        nav.append(_btn("▶️", f"adm:users:{page + 1}"))
+        nav.append(("▶️", f"adm:users:{page + 1}"))
     if nav:
         rows.append(nav)
     await cb.message.edit_text("\n".join(lines), reply_markup=ikb(rows))
@@ -164,8 +166,8 @@ async def adm_user_detail(cb: CallbackQuery, session, user: User):
     ]
     rows = []
     if not target.is_premium:
-        rows.append([_btn("⭐ Grant Premium (seumur hidup)", f"adm:grant:{target.id}")])
-    rows.append([_btn("⬅️ Kembali", "adm:users:0")])
+        rows.append([("⭐ Grant Premium (seumur hidup)", f"adm:grant:{target.id}")])
+    rows.append([("⬅️ Kembali", "adm:users:0")])
     await cb.message.edit_text("\n".join(lines), reply_markup=ikb(rows))
     await cb.answer()
 
@@ -269,6 +271,8 @@ async def adm_bc_text(message: Message, state):
         await message.answer("Teks tidak boleh kosong.")
         return
     await state.update_data(broadcast_text=text)
+    await confirm_step(message.bot, message.chat.id, state,
+                       f"📝 Teks diterima ({len(text)} karakter)")
     await render_step(
         message.bot, message.chat.id, state,
         f"📢 <b>Pratinjau broadcast:</b>\n\n{text[:2000]}\n\nKirim ke semua user aktif?",
@@ -327,13 +331,15 @@ async def adm_setai_menu(cb: CallbackQuery, session, user: User):
 async def adm_back(cb: CallbackQuery, session, user: User):
     if not is_admin(user.telegram_id):
         return await cb.answer("Akses ditolak.", show_alert=True)
-    await cmd_admin(cb.message, session, user)
+    await _render_panel(cb.message.bot, cb.message.chat.id, cb.message.message_id, session)
     await cb.answer()
 
 
 async def _prompt_input(cb: CallbackQuery, state, target_state, prompt: str):
+    """Mulai input admin (transaksional): prompt pesan baru; panel asal
+    diingat (panel_msg_id) supaya bisa di-refresh di tempat saat selesai."""
     await state.set_state(target_state)
-    await state.update_data(msg_id=None)
+    await state.update_data(panel_msg_id=cb.message.message_id)
     await render_step(cb.message.bot, cb.message.chat.id, state, prompt,
                       ikb([[("❌ Batal", "adm:cancel")]]))
     await cb.answer()
@@ -383,33 +389,39 @@ async def adm_input_key(message: Message, state, session, user: User):
     if not is_admin(user.telegram_id):
         return
     value = "" if message.text.strip() == "-" else message.text.strip()
+    await confirm_step(message.bot, message.chat.id, state, f"🔑 {_mask_key(value)}")
+    data = await state.get_data()
     await SettingsService(session).set_ai_api_key(value, user.telegram_id)
     clear_cache()
     await state.clear()
     await message.answer("🔑 API key tersimpan (terenkripsi).")
-    await _rerender_setai(message, session, user)
+    await _rerender_setai(message.bot, message.chat.id, data.get("panel_msg_id"), session)
 
 
 @router.message(AdminInputStates.entering_base_url)
 async def adm_input_url(message: Message, state, session, user: User):
     if not is_admin(user.telegram_id):
         return
+    await confirm_step(message.bot, message.chat.id, state, f"🔗 {message.text.strip()}")
+    data = await state.get_data()
     await SettingsService(session).set("ai_base_url", message.text.strip(), user.telegram_id)
     clear_cache()
     await state.clear()
     await message.answer("🔗 Base URL tersimpan.")
-    await _rerender_setai(message, session, user)
+    await _rerender_setai(message.bot, message.chat.id, data.get("panel_msg_id"), session)
 
 
 @router.message(AdminInputStates.entering_model)
 async def adm_input_model(message: Message, state, session, user: User):
     if not is_admin(user.telegram_id):
         return
+    await confirm_step(message.bot, message.chat.id, state, f"🧠 {message.text.strip()}")
+    data = await state.get_data()
     await SettingsService(session).set("ai_model", message.text.strip(), user.telegram_id)
     clear_cache()
     await state.clear()
     await message.answer("🧠 Model tersimpan.")
-    await _rerender_setai(message, session, user)
+    await _rerender_setai(message.bot, message.chat.id, data.get("panel_msg_id"), session)
 
 
 @router.message(AdminInputStates.entering_daily_limit)
@@ -423,13 +435,16 @@ async def adm_input_limit(message: Message, state, session, user: User):
     except ValueError:
         await message.answer("⚠️ Kirim angka saja (mis. 30).")
         return
+    await confirm_step(message.bot, message.chat.id, state, f"⏳ {limit}")
+    data = await state.get_data()
     await SettingsService(session).set("ai_daily_limit", str(limit), user.telegram_id)
     await state.clear()
     await message.answer(f"⏳ Kuota harian AI: {limit}.")
-    await _rerender_setai(message, session, user)
+    await _rerender_setai(message.bot, message.chat.id, data.get("panel_msg_id"), session)
 
 
-async def _rerender_setai(message: Message, session, user: User):
+async def _rerender_setai(bot, chat_id: int, message_id: int | None, session):
+    """Info konfigurasi AI — refresh pesan panel di tempat."""
     svc = SettingsService(session)
     cfg = await svc.ai_config()
     lines = [
@@ -448,7 +463,7 @@ async def _rerender_setai(message: Message, session, user: User):
         [("🧠 Ganti Model", "adm:setmodel"), ("⏳ Kuota Harian", "adm:setlimit")],
         [("⬅️ Kembali", "adm:back")],
     ])
-    await edit_or_send(message.bot, message.chat.id, None, "\n".join(lines), kb)
+    await edit_or_send(bot, chat_id, message_id, "\n".join(lines), kb)
 
 
 # ============================== Pengaturan sistem =============================
@@ -537,10 +552,12 @@ async def adm_input_freelimit(message: Message, state, session, user: User):
     except ValueError:
         await message.answer("⚠️ Kirim angka saja (mis. 200).")
         return
+    await confirm_step(message.bot, message.chat.id, state, f"🔢 {limit}/bulan")
+    data = await state.get_data()
     await SettingsService(session).set("free_transaction_limit", str(limit), user.telegram_id)
     await state.clear()
     await message.answer(f"🔢 Kuota free: {limit}/bulan.")
-    await _rerender_sett(message, session, user)
+    await _rerender_sett(message.bot, message.chat.id, data.get("panel_msg_id"), session)
 
 
 @router.message(AdminInputStates.entering_price)
@@ -551,23 +568,30 @@ async def adm_input_price(message: Message, state, session, user: User):
     if price is None or price <= 0:
         await message.answer("⚠️ Format harga tidak dikenali. Contoh: 50000, 50rb.")
         return
+    await confirm_step(message.bot, message.chat.id, state, f"💰 {format_rupiah(price)}")
+    data = await state.get_data()
     await SettingsService(session).set("premium_price", str(price), user.telegram_id)
     await state.clear()
     await message.answer(f"💰 Harga premium: {format_rupiah(price)}.")
-    await _rerender_sett(message, session, user)
+    await _rerender_sett(message.bot, message.chat.id, data.get("panel_msg_id"), session)
 
 
 @router.message(AdminInputStates.entering_instructions)
 async def adm_input_instr(message: Message, state, session, user: User):
     if not is_admin(user.telegram_id):
         return
-    await SettingsService(session).set("payment_instructions", message.text.strip(), user.telegram_id)
+    instr = message.text.strip()
+    shown = instr[:80] + "…" if len(instr) > 80 else instr
+    await confirm_step(message.bot, message.chat.id, state, f"📝 {shown}")
+    data = await state.get_data()
+    await SettingsService(session).set("payment_instructions", instr, user.telegram_id)
     await state.clear()
     await message.answer("📝 Instruksi pembayaran tersimpan.")
-    await _rerender_sett(message, session, user)
+    await _rerender_sett(message.bot, message.chat.id, data.get("panel_msg_id"), session)
 
 
-async def _rerender_sett(message: Message, session, user: User):
+async def _rerender_sett(bot, chat_id: int, message_id: int | None, session):
+    """Info pengaturan sistem — refresh pesan panel di tempat."""
     svc = SettingsService(session)
     price = await svc.premium_price()
     days = await svc.premium_duration_days()
@@ -587,4 +611,4 @@ async def _rerender_sett(message: Message, session, user: User):
         [("📝 Instruksi Bayar", "adm:setinstr")],
         [("⬅️ Kembali", "adm:back")],
     ])
-    await edit_or_send(message.bot, message.chat.id, None, "\n".join(lines), kb)
+    await edit_or_send(bot, chat_id, message_id, "\n".join(lines), kb)

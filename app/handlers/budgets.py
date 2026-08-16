@@ -1,10 +1,15 @@
-"""Budget per kategori/total + alert pemakaian (PRD §5.1)."""
+"""Budget per kategori/total + alert pemakaian (PRD §5.1).
+
+Pola UX FSM (PRD §7): tiap prompt langkah pesan BARU; jawaban user ditempel
+di prompt sebelumnya via `confirm_step`. Menu daftar budget tetap di-update
+di tempat.
+"""
 
 from decimal import Decimal
 
 from aiogram import F, Router
 from aiogram.filters import Command
-from aiogram.types import CallbackQuery, InlineKeyboardButton, Message
+from aiogram.types import CallbackQuery, Message
 
 from app.db.models import Budget, User
 from app.domain.money import format_rupiah, parse_amount
@@ -16,15 +21,16 @@ from app.repositories.categories import CategoryRepo
 from app.services.budgets import BudgetService
 from app.services.errors import ValidationError
 from app.utils.format import fmt_date_short, today_local
-from app.utils.messages import edit_or_send, render_step
+from app.utils.messages import confirm_step, edit_or_send, render_step
 
 router = Router()
 
 PERIOD_LABELS = {"weekly": "Mingguan", "monthly": "Bulanan"}
 
 
-def _btn(text: str, cb: str) -> InlineKeyboardButton:
-    return InlineKeyboardButton(text=text, callback_data=cb)
+def _btn(text: str, cb: str) -> tuple[str, str]:
+    """Tuple (text, callback_data) untuk `ikb` — jangan kembalikan objek tombol."""
+    return (text, cb)
 
 
 async def _budget_row(session, b: Budget, usage: Decimal) -> str:
@@ -120,7 +126,8 @@ async def bg_del_no(cb: CallbackQuery, session, user: User):
 @router.callback_query(F.data == "bg:add")
 async def bg_add(cb: CallbackQuery, state):
     await state.set_state(BudgetStates.choosing_scope)
-    await state.update_data(msg_id=None)
+    # ingat pesan menu asal — di-refresh di tempat saat budget selesai dibuat
+    await state.update_data(menu_msg_id=cb.message.message_id)
     await render_step(
         cb.message.bot, cb.message.chat.id, state, "📊 Budget untuk apa?",
         ikb([[("🌐 Total pengeluaran", "bg:scope:total")],
@@ -134,6 +141,8 @@ async def bg_add(cb: CallbackQuery, state):
 async def bg_scope_total(cb: CallbackQuery, state):
     await state.update_data(budget_category_id=None)
     await state.set_state(BudgetStates.entering_amount)
+    await confirm_step(cb.message.bot, cb.message.chat.id, state,
+                       "Anda memilih: 🌐 Total pengeluaran")
     await render_step(
         cb.message.bot, cb.message.chat.id, state,
         "💰 Jumlah budget total per periode (contoh: 1500000, 1,5jt):",
@@ -145,11 +154,14 @@ async def bg_scope_total(cb: CallbackQuery, state):
 @router.callback_query(F.data == "bg:scope:cat", BudgetStates.choosing_scope)
 async def bg_scope_cat(cb: CallbackQuery, state, session, user: User):
     await state.set_state(BudgetStates.choosing_category)
+    await confirm_step(cb.message.bot, cb.message.chat.id, state,
+                       "Anda memilih: 🏷️ Per kategori")
     await _render_budget_categories(cb.message, state, session, user, 0)
     await cb.answer()
 
 
-async def _render_budget_categories(message, state, session, user: User, page: int):
+async def _render_budget_categories(message, state, session, user: User, page: int, *,
+                                    edit: bool = False):
     categories = [c for c in await CategoryRepo(session).list_for_user(user.id)
                   if c.type == "expense"]
     per_page = 10
@@ -165,12 +177,14 @@ async def _render_budget_categories(message, state, session, user: User, page: i
     if nav:
         rows.append(nav)
     rows.append([_btn("❌ Batal", "bg:cancel")])
-    await render_step(message.bot, message.chat.id, state, "🏷️ Budget untuk kategori mana?", ikb(rows))
+    await render_step(message.bot, message.chat.id, state, "🏷️ Budget untuk kategori mana?",
+                      ikb(rows), edit=edit)
 
 
 @router.callback_query(F.data.startswith("bg:cpg:"), BudgetStates.choosing_category)
 async def bg_category_page(cb: CallbackQuery, state, session, user: User):
-    await _render_budget_categories(cb.message, state, session, user, int(cb.data.split(":")[2]))
+    await _render_budget_categories(cb.message, state, session, user,
+                                    int(cb.data.split(":")[2]), edit=True)
     await cb.answer()
 
 
@@ -181,6 +195,8 @@ async def bg_choose_category(cb: CallbackQuery, state, session, user: User):
         return await cb.answer("Kategori tidak valid.", show_alert=True)
     await state.update_data(budget_category_id=category.id)
     await state.set_state(BudgetStates.entering_amount)
+    await confirm_step(cb.message.bot, cb.message.chat.id, state,
+                       f"🏷️ {category.icon or '•'} {category.name}")
     await render_step(
         cb.message.bot, cb.message.chat.id, state,
         f"💰 Jumlah budget <b>{category.name}</b> per periode (contoh: 500000, 500rb):",
@@ -197,6 +213,7 @@ async def bg_enter_amount(message: Message, state):
         return
     await state.update_data(budget_amount=str(value))
     await state.set_state(BudgetStates.choosing_period)
+    await confirm_step(message.bot, message.chat.id, state, f"💵 {format_rupiah(value)}")
     await render_step(
         message.bot, message.chat.id, state, "📅 Periode budget?",
         ikb([[("📆 Mingguan", "bg:per:weekly"), ("🗓️ Bulanan", "bg:per:monthly")],
@@ -218,6 +235,8 @@ async def bg_choose_period(cb: CallbackQuery, state, session, user: User):
         )
     except ValidationError as e:
         return await cb.answer(f"⚠️ {e}", show_alert=True)
+    await confirm_step(cb.message.bot, cb.message.chat.id, state,
+                       f"Anda memilih: {PERIOD_LABELS.get(period, period)}")
     await state.clear()
-    await _render_menu(cb.message.bot, cb.message.chat.id, cb.message.message_id, session, user)
+    await _render_menu(cb.message.bot, cb.message.chat.id, data.get("menu_msg_id"), session, user)
     await cb.answer("Budget dibuat ✅")

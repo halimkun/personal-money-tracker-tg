@@ -1,4 +1,9 @@
-"""Kelola wallet: daftar+saldo, tambah, rename, default, nonaktifkan (PRD §4, §5.1)."""
+"""Kelola wallet: daftar+saldo, tambah, rename, default, nonaktifkan (PRD §4, §5.1).
+
+Pola UX FSM (PRD §7): tiap prompt langkah pesan BARU; jawaban user ditempel
+di prompt sebelumnya via `confirm_step`. Menu daftar wallet tetap di-update
+di tempat.
+"""
 
 from decimal import Decimal
 
@@ -14,12 +19,13 @@ from app.keyboards.inline import ikb
 from app.services.errors import ValidationError
 from app.services.wallets import WalletService
 from app.texts.id import WELCOME_WALLET_DONE
-from app.utils.messages import edit_or_send, render_step
+from app.utils.messages import confirm_step, edit_or_send, render_step
 
 router = Router()
 
 TYPE_CHOICES = [("cash", "💵 Tunai"), ("bank", "🏦 Bank"),
                 ("ewallet", "📱 E-Wallet"), ("other", "💼 Lainnya")]
+TYPE_LABELS_MAP = dict(TYPE_CHOICES)
 
 
 async def _render_menu(bot, chat_id: int, message_id: int | None, session, user: User):
@@ -51,13 +57,13 @@ async def wl_back(cb: CallbackQuery, session, user: User):
     await cb.answer()
 
 
-@router.callback_query(F.data.startswith("wl:sel:"))
-async def wl_detail(cb: CallbackQuery, session, user: User):
-    wallet_id = int(cb.data.split(":")[2])
+async def _render_detail(bot, chat_id: int, message_id: int | None, session, user: User,
+                         wallet_id: int) -> bool:
+    """Detail wallet (info) — update pesan di tempat. False kalau tidak ditemukan."""
     items = await WalletService(session).list_with_balances(user.id)
     wallet, balance = next(((w, b) for w, b in items if w.id == wallet_id), (None, None))
     if not wallet:
-        return await cb.answer("Wallet tidak ditemukan.", show_alert=True)
+        return False
     icon = WALLET_TYPE_ICONS.get(wallet.type, "💼")
     lines = [
         f"{icon} <b>{wallet.name}</b>",
@@ -74,7 +80,15 @@ async def wl_detail(cb: CallbackQuery, session, user: User):
         kb_rows.append([(f"✏️ Ganti Nama", f"wl:ren:{wallet.id}")])
         kb_rows.append([(f"🚫 Nonaktifkan", f"wl:off:{wallet.id}")])
     kb_rows.append([("⬅️ Kembali", "wl:back")])
-    await cb.message.edit_text("\n".join(lines), reply_markup=ikb(kb_rows))
+    await edit_or_send(bot, chat_id, message_id, "\n".join(lines), ikb(kb_rows))
+    return True
+
+
+@router.callback_query(F.data.startswith("wl:sel:"))
+async def wl_detail(cb: CallbackQuery, session, user: User):
+    if not await _render_detail(cb.message.bot, cb.message.chat.id, cb.message.message_id,
+                                session, user, int(cb.data.split(":")[2])):
+        return await cb.answer("Wallet tidak ditemukan.", show_alert=True)
     await cb.answer()
 
 
@@ -112,7 +126,8 @@ async def wl_cancel(cb: CallbackQuery, state):
 @router.callback_query(F.data == "wl:add")
 async def wl_add(cb: CallbackQuery, state, session, user: User):
     await state.set_state(WalletStates.entering_name)
-    await state.update_data(wallet_task="add", msg_id=None)
+    # ingat pesan menu asal — di-refresh di tempat saat wallet selesai dibuat
+    await state.update_data(wallet_task="add", menu_msg_id=cb.message.message_id)
     await render_step(
         cb.message.bot, cb.message.chat.id, state,
         "💼 Nama wallet baru (mis. <b>OVO</b>, <b>Mandiri</b>):",
@@ -125,7 +140,9 @@ async def wl_add(cb: CallbackQuery, state, session, user: User):
 async def wl_rename_start(cb: CallbackQuery, state):
     wallet_id = int(cb.data.split(":")[2])
     await state.set_state(WalletStates.entering_name)
-    await state.update_data(wallet_task="rename", wallet_id=wallet_id, msg_id=None)
+    # ingat pesan detail asal — di-refresh di tempat saat rename selesai
+    await state.update_data(wallet_task="rename", wallet_id=wallet_id,
+                            detail_msg_id=cb.message.message_id)
     await render_step(
         cb.message.bot, cb.message.chat.id, state, "✏️ Nama baru wallet:",
         ikb([[("❌ Batal", "wl:cancel")]]),
@@ -144,13 +161,16 @@ async def wl_enter_name(message: Message, state, session, user: User):
         except ValidationError as e:
             await message.answer(f"⚠️ {e}")
             return
+        await confirm_step(message.bot, message.chat.id, state, f"✏️ {name}")
         await state.clear()
         await message.answer("✅ Nama wallet diubah.")
-        await _render_menu(message.bot, message.chat.id, None, session, user)
+        await _render_detail(message.bot, message.chat.id, data.get("detail_msg_id"),
+                             session, user, data["wallet_id"])
         return
 
     await state.update_data(wallet_name=name)
     await state.set_state(WalletStates.choosing_type)
+    await confirm_step(message.bot, message.chat.id, state, f"💼 {name}")
     rows = [[(label, f"wl:type:{code}") for code, label in TYPE_CHOICES[i : i + 2]]
             for i in range(0, len(TYPE_CHOICES), 2)]
     rows.append([("❌ Batal", "wl:cancel")])
@@ -164,6 +184,8 @@ async def wl_choose_type(cb: CallbackQuery, state):
         return await cb.answer("Tipe tidak valid.", show_alert=True)
     await state.update_data(wallet_type=type_)
     await state.set_state(WalletStates.entering_initial_balance)
+    await confirm_step(cb.message.bot, cb.message.chat.id, state,
+                       f"Anda memilih: {TYPE_LABELS_MAP[type_]}")
     await render_step(
         cb.message.bot, cb.message.chat.id, state,
         "💰 Saldo awal? (ketik <b>0</b> kalau kosong — contoh: 100000, 250rb):",
@@ -187,9 +209,10 @@ async def wl_enter_balance(message: Message, state, session, user: User):
         await message.answer(f"⚠️ {e}")
         return
     task = data.get("wallet_task", "add")
+    await confirm_step(message.bot, message.chat.id, state, f"💵 {format_rupiah(value)}")
     await state.clear()
     if task == "start":
         await message.answer(WELCOME_WALLET_DONE)
     else:
         await message.answer("✅ Wallet dibuat.")
-        await _render_menu(message.bot, message.chat.id, None, session, user)
+        await _render_menu(message.bot, message.chat.id, data.get("menu_msg_id"), session, user)

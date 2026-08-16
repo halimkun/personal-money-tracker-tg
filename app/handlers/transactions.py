@@ -1,7 +1,9 @@
 """Transaksi manual: /catat (FSM), /riwayat (list+pagination+filter), edit/hapus.
 
-Pola UX (PRD §7): pilihan dari daftar & navigasi → edit message;
-input free-text (jumlah/catatan) → FSM multi-step dengan tombol Batal.
+Pola UX FSM (PRD §7): tiap langkah prompt adalah PESAN BARU; jawaban user
+(pilihan tombol atau teks yang diketik) ditempel di prompt langkah sebelumnya
+lewat `confirm_step` — update pesan hanya untuk konfirmasi, bukan prompt.
+Menu/navigasi /riwayat tetap di-update di tempat.
 Edit transaksi memakai callback token (PRD §7c).
 """
 
@@ -26,7 +28,7 @@ from app.services.settings import SettingsService
 from app.services.transactions import TransactionService
 from app.texts.id import MSG_FREEMIUM_BLOCKED
 from app.utils.format import fmt_date_short, today_local
-from app.utils.messages import edit_or_send, render_step
+from app.utils.messages import confirm_step, edit_or_send, render_step
 
 router = Router()
 
@@ -58,7 +60,6 @@ async def cmd_catat(message: Message, state, session, user: User):
         return
 
     await state.set_state(AddTransactionStates.choosing_type)
-    await state.update_data(msg_id=None)
     await render_step(
         message.bot, message.chat.id, state, "📝 Mau catat apa?",
         ikb([[("💸 Pengeluaran", "tx:t:expense"), ("💰 Pemasukan", "tx:t:income")],
@@ -97,6 +98,7 @@ async def tx_choose_type(cb: CallbackQuery, state):
     await state.update_data(type=type_)
     await state.set_state(AddTransactionStates.entering_amount)
     label, icon = TYPE_LABELS[type_]
+    await confirm_step(cb.message.bot, cb.message.chat.id, state, f"Anda memilih: {icon} {label}")
     await render_step(
         cb.message.bot, cb.message.chat.id, state,
         f"{icon} Masukkan jumlah {label.lower()} (contoh: 25000, 25.000, 25rb, 2jt):",
@@ -113,6 +115,7 @@ async def tx_enter_amount(message: Message, state, session, user: User):
         return
     await state.update_data(amount=str(value))
     await state.set_state(AddTransactionStates.choosing_wallet)
+    await confirm_step(message.bot, message.chat.id, state, f"💵 {format_rupiah(value)}")
     wallets = await WalletRepo(session).list_by_user(user.id, active_only=True)
     kb = ikb(
         [[(f"{WALLET_TYPE_ICONS.get(w.type, '💼')} {w.name}", f"tx:w:{w.id}")] for w in wallets]
@@ -129,11 +132,14 @@ async def tx_choose_wallet(cb: CallbackQuery, state, session, user: User):
         return await cb.answer("Wallet tidak ditemukan.", show_alert=True)
     await state.update_data(wallet_id=wallet.id, wallet_name=wallet.name)
     await state.set_state(AddTransactionStates.choosing_category)
+    await confirm_step(cb.message.bot, cb.message.chat.id, state,
+                       f"👛 {WALLET_TYPE_ICONS.get(wallet.type, '💼')} {wallet.name}")
     await _render_category_list(cb.message, state, session, user, "tx:", 0)
     await cb.answer()
 
 
-async def _render_category_list(message, state, session, user: User, prefix: str, page: int):
+async def _render_category_list(message, state, session, user: User, prefix: str, page: int,
+                                *, edit: bool = False):
     data = await state.get_data()
     categories = [c for c in await CategoryRepo(session).list_for_user(user.id) if c.type == data["type"]]
     total_pages = max(1, (len(categories) + CAT_PER_PAGE - 1) // CAT_PER_PAGE)
@@ -144,12 +150,13 @@ async def _render_category_list(message, state, session, user: User, prefix: str
         select_prefix=f"{prefix}c:", page_prefix=f"{prefix}cpg:",
     )
     kb.inline_keyboard.append([_cancel_btn(f"{prefix}cancel")])
-    await render_step(message.bot, message.chat.id, state, "🏷️ Pilih kategori:", kb)
+    await render_step(message.bot, message.chat.id, state, "🏷️ Pilih kategori:", kb, edit=edit)
 
 
 @router.callback_query(F.data.startswith("tx:cpg:"), AddTransactionStates.choosing_category)
 async def tx_category_page(cb: CallbackQuery, state, session, user: User):
-    await _render_category_list(cb.message, state, session, user, "tx:", int(cb.data.split(":")[2]))
+    await _render_category_list(cb.message, state, session, user, "tx:",
+                                int(cb.data.split(":")[2]), edit=True)
     await cb.answer()
 
 
@@ -160,10 +167,10 @@ async def tx_choose_category(cb: CallbackQuery, state, session, user: User):
     category = await CategoryRepo(session).get_usable(category_id, user.id)
     if not category or category.type != data["type"]:
         return await cb.answer("Kategori tidak valid.", show_alert=True)
-    await state.update_data(
-        category_id=category.id, category_name=f"{category.icon or ''} {category.name}".strip()
-    )
+    category_name = f"{category.icon or ''} {category.name}".strip()
+    await state.update_data(category_id=category.id, category_name=category_name)
     await state.set_state(AddTransactionStates.entering_note)
+    await confirm_step(cb.message.bot, cb.message.chat.id, state, f"🏷️ {category_name}")
     await render_step(
         cb.message.bot, cb.message.chat.id, state,
         "🗒️ Catatan (opsional) — kirim teks atau tekan Lewati:",
@@ -177,6 +184,7 @@ async def tx_skip_note(cb: CallbackQuery, state):
     await state.update_data(note=None)
     await state.set_state(AddTransactionStates.confirming)
     data = await state.get_data()
+    await confirm_step(cb.message.bot, cb.message.chat.id, state, "⏭️ Tanpa catatan")
     await render_step(
         cb.message.bot, cb.message.chat.id, state, await _tx_summary(data),
         ikb([[("✅ Simpan", "tx:save"), ("❌ Batal", "tx:cancel")]]),
@@ -186,9 +194,11 @@ async def tx_skip_note(cb: CallbackQuery, state):
 
 @router.message(AddTransactionStates.entering_note)
 async def tx_enter_note(message: Message, state):
-    await state.update_data(note=message.text.strip()[:500])
+    note = message.text.strip()[:500]
+    await state.update_data(note=note)
     await state.set_state(AddTransactionStates.confirming)
     data = await state.get_data()
+    await confirm_step(message.bot, message.chat.id, state, f"🗒️ {note}")
     await render_step(
         message.bot, message.chat.id, state, await _tx_summary(data),
         ikb([[("✅ Simpan", "tx:save"), ("❌ Batal", "tx:cancel")]]),
@@ -377,7 +387,7 @@ async def edit_tx_from_token(cb: CallbackQuery, state, session, user: User):
         amount=str(tx.amount),
         category_id=tx.category_id,
         category_name=f"{category.icon or ''} {category.name}".strip() if category else "?",
-        note=tx.note, msg_id=None,
+        note=tx.note,
     )
     await render_step(
         cb.message.bot, cb.message.chat.id, state,
@@ -395,17 +405,19 @@ async def edit_cancel(cb: CallbackQuery, state):
 
 
 @router.message(EditTransactionStates.choosing_amount)
-async def edit_enter_amount(message: Message, state):
+async def edit_enter_amount(message: Message, state, session, user: User):
     value = parse_amount(message.text)
     if value is None:
         await message.answer("⚠️ Format jumlah tidak dikenali. Contoh: 25000, 25.000, 25rb, 2jt")
         return
     await state.update_data(amount=str(value))
     await state.set_state(EditTransactionStates.choosing_category)
-    await _render_edit_category(message, state, 0)
+    await confirm_step(message.bot, message.chat.id, state, f"💵 {format_rupiah(value)}")
+    await _render_edit_category(message, state, session, user, 0)
 
 
-async def _render_edit_category(message, state, session, user: User, page: int):
+async def _render_edit_category(message, state, session, user: User, page: int, *,
+                                edit: bool = False):
     data = await state.get_data()
     categories = [c for c in await CategoryRepo(session).list_for_user(user.id)
                   if c.type == data["type"]]
@@ -420,12 +432,14 @@ async def _render_edit_category(message, state, session, user: User, page: int):
     await render_step(
         message.bot, message.chat.id, state,
         f"🏷️ Kategori baru? (sekarang: <b>{data.get('category_name', '?')}</b>):", kb,
+        edit=edit,
     )
 
 
 @router.callback_query(F.data.startswith("edit:cpg:"), EditTransactionStates.choosing_category)
 async def edit_category_page(cb: CallbackQuery, state, session, user: User):
-    await _render_edit_category(cb.message, state, session, user, int(cb.data.split(":")[2]))
+    await _render_edit_category(cb.message, state, session, user,
+                                int(cb.data.split(":")[2]), edit=True)
     await cb.answer()
 
 
@@ -436,10 +450,10 @@ async def edit_choose_category(cb: CallbackQuery, state, session, user: User):
     category = await CategoryRepo(session).get_usable(category_id, user.id)
     if not category or category.type != data["type"]:
         return await cb.answer("Kategori tidak valid.", show_alert=True)
-    await state.update_data(
-        category_id=category.id, category_name=f"{category.icon or ''} {category.name}".strip()
-    )
+    category_name = f"{category.icon or ''} {category.name}".strip()
+    await state.update_data(category_id=category.id, category_name=category_name)
     await state.set_state(EditTransactionStates.entering_note)
+    await confirm_step(cb.message.bot, cb.message.chat.id, state, f"🏷️ {category_name}")
     await render_step(
         cb.message.bot, cb.message.chat.id, state,
         f"🗒️ Catatan baru? (sekarang: <i>{data.get('note') or '—'}</i>)",
@@ -452,6 +466,7 @@ async def edit_choose_category(cb: CallbackQuery, state, session, user: User):
 async def edit_skip_note(cb: CallbackQuery, state):
     await state.update_data(note=None)
     await state.set_state(EditTransactionStates.confirming)
+    await confirm_step(cb.message.bot, cb.message.chat.id, state, "⏭️ Tanpa catatan")
     await render_step(
         cb.message.bot, cb.message.chat.id, state, await _edit_summary(state),
         ikb([[("✅ Simpan", "edit:save"), ("❌ Batal", "edit:cancel")]]),
@@ -461,8 +476,10 @@ async def edit_skip_note(cb: CallbackQuery, state):
 
 @router.message(EditTransactionStates.entering_note)
 async def edit_enter_note(message: Message, state):
-    await state.update_data(note=message.text.strip()[:500])
+    note = message.text.strip()[:500]
+    await state.update_data(note=note)
     await state.set_state(EditTransactionStates.confirming)
+    await confirm_step(message.bot, message.chat.id, state, f"🗒️ {note}")
     await render_step(
         message.bot, message.chat.id, state, await _edit_summary(state),
         ikb([[("✅ Simpan", "edit:save"), ("❌ Batal", "edit:cancel")]]),

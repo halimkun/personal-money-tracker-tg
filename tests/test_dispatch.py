@@ -19,7 +19,7 @@ from aiogram.methods import EditMessageText, SendMessage
 from aiogram.types import CallbackQuery, Chat, Message, Update, User as TgUser
 
 from app.handlers.states import QuickAddStates, WalletStates
-from tests.conftest import make_user
+from tests.conftest import make_user, make_wallet
 
 
 async def make_bot(monkeypatch) -> Bot:
@@ -128,3 +128,173 @@ class TestDispatch:
         await dp.feed_update(bot, Update(update_id=1, callback_query=cb))
 
         assert any(m.text for m in api_calls(EditMessageText))  # menu wallet dirender ulang
+
+    async def test_catat_step_confirms_then_sends_new_prompt(self, app_dispatcher, session_factory,
+                                                             monkeypatch):
+        """UX multi-step: pilihan user di-edit ke prompt LAMA (konfirmasi),
+        prompt langkah berikutnya dikirim sebagai pesan BARU — bukan edit."""
+        dp, _ = app_dispatcher
+        dp["session_factory"] = session_factory
+        async with session_factory() as s:
+            u = await make_user(s, tg_id=123)
+            await make_wallet(s, u.id)
+            await s.commit()
+        bot = await make_bot(monkeypatch)
+
+        await dp.feed_update(bot, Update(update_id=1, message=make_msg(123, 123, "/catat")))
+        cb = CallbackQuery(
+            id="1",
+            from_user=TgUser(id=123, is_bot=False, first_name="Tester"),
+            chat_instance="ci",
+            message=make_msg(123, 123, "junk"),
+            data="tx:t:expense",
+        )
+        await dp.feed_update(bot, Update(update_id=2, callback_query=cb))
+
+        edits = api_calls(EditMessageText)
+        sent = api_calls(SendMessage)
+        # konfirmasi pilihan di prompt lama
+        assert any("Anda memilih: 💸 Pengeluaran" in (m.text or "") for m in edits)
+        # prompt jumlah sebagai pesan BARU (bukan edit prompt lama)
+        assert any("Masukkan jumlah pengeluaran" in (m.text or "") for m in sent)
+
+    async def test_catat_amount_echoed_in_prompt(self, app_dispatcher, session_factory,
+                                                 monkeypatch):
+        """Input teks jumlah ditempel di prompt lama, lalu prompt wallet pesan baru."""
+        dp, _ = app_dispatcher
+        dp["session_factory"] = session_factory
+        async with session_factory() as s:
+            u = await make_user(s, tg_id=123)
+            await make_wallet(s, u.id)
+            await s.commit()
+        bot = await make_bot(monkeypatch)
+
+        await dp.feed_update(bot, Update(update_id=1, message=make_msg(123, 123, "/catat")))
+        cb = CallbackQuery(
+            id="1",
+            from_user=TgUser(id=123, is_bot=False, first_name="Tester"),
+            chat_instance="ci",
+            message=make_msg(123, 123, "junk"),
+            data="tx:t:expense",
+        )
+        await dp.feed_update(bot, Update(update_id=2, callback_query=cb))
+        await dp.feed_update(bot, Update(update_id=3, message=make_msg(123, 123, "25000")))
+
+        edits = api_calls(EditMessageText)
+        sent = api_calls(SendMessage)
+        assert any("💵 Rp 25.000" in (m.text or "") for m in edits)  # jumlah di-echo ke prompt lama
+        assert any("Pilih wallet" in (m.text or "") for m in sent)  # prompt wallet pesan baru
+
+    async def test_toggle_setting_updates_in_place(self, app_dispatcher, session_factory,
+                                                   monkeypatch):
+        """Toggle (set:tins) = update pesan di tempat — tidak kirim pesan baru."""
+        dp, _ = app_dispatcher
+        dp["session_factory"] = session_factory
+        async with session_factory() as s:
+            await make_user(s, tg_id=123)
+            await s.commit()
+        bot = await make_bot(monkeypatch)
+
+        await dp.feed_update(bot, Update(update_id=1, message=make_msg(123, 123, "/pengaturan")))
+        sent_before = len(api_calls(SendMessage))
+        cb = CallbackQuery(
+            id="1",
+            from_user=TgUser(id=123, is_bot=False, first_name="Tester"),
+            chat_instance="ci",
+            message=make_msg(123, 123, "junk"),
+            data="set:tins",
+        )
+        await dp.feed_update(bot, Update(update_id=2, callback_query=cb))
+
+        assert len(api_calls(SendMessage)) == sent_before  # toggle TIDAK kirim pesan baru
+        edits = api_calls(EditMessageText)
+        assert any("Insight AI bulanan" in (m.text or "") for m in edits)  # info di-update di tempat
+
+    async def test_admin_input_refreshes_panel_in_place(self, app_dispatcher, session_factory,
+                                                        monkeypatch):
+        """Input admin (transaksional): prompt pesan baru + konfirmasi;
+        panel Konfigurasi AI di-refresh DI TEMPAT (bukan dikirim ulang)."""
+        from app.config import settings as app_settings
+
+        monkeypatch.setattr(app_settings, "admin_ids", "123")
+        dp, _ = app_dispatcher
+        dp["session_factory"] = session_factory
+        async with session_factory() as s:
+            await make_user(s, tg_id=123)
+            await s.commit()
+        bot = await make_bot(monkeypatch)
+
+        await dp.feed_update(bot, Update(update_id=1, message=make_msg(123, 123, "/admin")))
+        cb = CallbackQuery(
+            id="1",
+            from_user=TgUser(id=123, is_bot=False, first_name="Tester"),
+            chat_instance="ci",
+            message=make_msg(123, 123, "junk"),
+            data="adm:setmodel",
+        )
+        await dp.feed_update(bot, Update(update_id=2, callback_query=cb))
+        await dp.feed_update(bot, Update(update_id=3, message=make_msg(123, 123, "gpt-4o-mini")))
+
+        edits = api_calls(EditMessageText)
+        sent = api_calls(SendMessage)
+        # konfirmasi input di prompt
+        assert any("🧠 gpt-4o-mini" in (m.text or "") for m in edits)
+        # panel info di-refresh di tempat dengan nilai baru
+        assert any("Model: gpt-4o-mini" in (m.text or "") for m in edits)
+        # panel TIDAK dikirim ulang sebagai pesan baru
+        assert not any("Konfigurasi AI" in (m.text or "") for m in sent)
+
+    async def test_admin_user_detail_buttons(self, app_dispatcher, session_factory, monkeypatch):
+        """Regression: detail user admin — ikb() menerima tuple, bukan objek tombol."""
+        from app.config import settings as app_settings
+
+        monkeypatch.setattr(app_settings, "admin_ids", "123")
+        dp, _ = app_dispatcher
+        dp["session_factory"] = session_factory
+        async with session_factory() as s:
+            target = await make_user(s, tg_id=555)
+            await make_user(s, tg_id=123)
+            await s.commit()
+        bot = await make_bot(monkeypatch)
+
+        await dp.feed_update(bot, Update(update_id=1, message=make_msg(123, 123, "/admin")))
+        cb_list = CallbackQuery(
+            id="1",
+            from_user=TgUser(id=123, is_bot=False, first_name="Tester"),
+            chat_instance="ci",
+            message=make_msg(123, 123, "junk"),
+            data="adm:users:0",
+        )
+        await dp.feed_update(bot, Update(update_id=2, callback_query=cb_list))
+        cb_detail = CallbackQuery(
+            id="2",
+            from_user=TgUser(id=123, is_bot=False, first_name="Tester"),
+            chat_instance="ci",
+            message=make_msg(123, 123, "junk"),
+            data=f"adm:user:{target.id}",
+        )
+        await dp.feed_update(bot, Update(update_id=3, callback_query=cb_detail))
+
+        edits = api_calls(EditMessageText)
+        assert any("👤" in (m.text or "") for m in edits)  # detail user dirender tanpa ValueError
+
+    async def test_budget_menu_with_existing_budget(self, app_dispatcher, session_factory,
+                                                    monkeypatch):
+        """Regression: menu /budget dengan budget terdaftar — tombol via ikb(rows)."""
+        from decimal import Decimal
+
+        from app.db.models import Budget
+
+        dp, _ = app_dispatcher
+        dp["session_factory"] = session_factory
+        async with session_factory() as s:
+            u = await make_user(s, tg_id=123)
+            s.add(Budget(user_id=u.id, category_id=None, wallet_id=None,
+                         period_type="monthly", amount=Decimal("100000")))
+            await s.commit()
+        bot = await make_bot(monkeypatch)
+
+        await dp.feed_update(bot, Update(update_id=1, message=make_msg(123, 123, "/budget")))
+
+        sent = api_calls(SendMessage)
+        assert any("Budget" in (m.text or "") for m in sent)  # menu dirender tanpa ValueError

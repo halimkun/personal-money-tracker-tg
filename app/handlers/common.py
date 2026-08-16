@@ -26,7 +26,7 @@ async def cmd_start(message: Message, state, session):
 
     await message.answer(WELCOME_NEW)
     await state.set_state(WalletStates.entering_name)
-    await state.update_data(wallet_task="start", msg_id=None)
+    await state.update_data(wallet_task="start")
     await render_step(
         message.bot, message.chat.id, state,
         "💼 Beri nama wallet pertamamu (mis. <b>Cash</b>, <b>BCA</b>, <b>GoPay</b>):",

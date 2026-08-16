@@ -4,6 +4,10 @@ Router ini DIDAFFTARKAN PALING AKHIR (lihat handlers/__init__.py) karena memuat
 handler generik untuk SEMUA teks/foto — handler FSM di router lain harus menang
 lebih dulu. LockingMiddleware juga menjamin pesan saat state aktif tidak sampai
 ke AI (hemat biaya).
+
+Pola UX: kartu konfirmasi adalah SATU pesan yang di-update di tempat (PRD §7
+konfirmasi) — koreksi jumlah/catatan/kategori/wallet menimpa kartu itu sendiri
+lewat render_step(edit=True), dan kartu selalu menampilkan nilai hasil koreksi.
 """
 
 import base64
@@ -276,7 +280,8 @@ async def _render_category_picker(cb: CallbackQuery, state, session, user: User,
         select_prefix="qa2:c:", page_prefix="qa2:cpg:",
     )
     kb.inline_keyboard.append([InlineKeyboardButton(text="❌ Batal", callback_data="qa2:cancel")])
-    await render_step(cb.message.bot, cb.message.chat.id, state, "🏷️ Pilih kategori baru:", kb)
+    await render_step(cb.message.bot, cb.message.chat.id, state, "🏷️ Pilih kategori baru:", kb,
+                      edit=True)
 
 
 @router.callback_query(F.data == "qa:cat", QuickAddStates.awaiting_confirmation)
@@ -312,7 +317,8 @@ async def _render_wallet_picker(cb: CallbackQuery, state, session, user: User,
                if w.id != exclude_id]
     kb = wallet_list_kb(wallets, select_prefix)
     kb.inline_keyboard.append([InlineKeyboardButton(text="❌ Batal", callback_data="qa2:cancel")])
-    await render_step(cb.message.bot, cb.message.chat.id, state, "👛 Pilih wallet:", kb)
+    await render_step(cb.message.bot, cb.message.chat.id, state, "👛 Pilih wallet:", kb,
+                      edit=True)
 
 
 @router.callback_query(F.data == "qa:wal", QuickAddStates.awaiting_confirmation)
@@ -373,6 +379,7 @@ async def qa_correct_amount(cb: CallbackQuery, state):
         cb.message.bot, cb.message.chat.id, state,
         "💰 Masukkan jumlah baru (contoh: 25000, 25.000, 25rb, 2jt):",
         ikb([[("❌ Batal", "qa2:cancel")]]),
+        edit=True,
     )
     await cb.answer()
 
@@ -395,6 +402,7 @@ async def qa_correct_note(cb: CallbackQuery, state):
         cb.message.bot, cb.message.chat.id, state,
         "🗒️ Kirim catatan baru, atau tekan Hapus Catatan:",
         ikb([[("🗑 Hapus Catatan", "qa2:clearnote")], [("❌ Batal", "qa2:cancel")]]),
+        edit=True,
     )
     await cb.answer()
 

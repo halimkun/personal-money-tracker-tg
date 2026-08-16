@@ -1,4 +1,9 @@
-"""Kelola kategori custom + keyword AI (PRD §4, §5.4)."""
+"""Kelola kategori custom + keyword AI (PRD §4, §5.4).
+
+Pola UX FSM (PRD §7): tiap prompt langkah pesan BARU; jawaban user ditempel
+di prompt sebelumnya via `confirm_step`. Menu daftar kategori tetap di-update
+di tempat.
+"""
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -10,7 +15,7 @@ from app.keyboards.inline import ikb
 from app.repositories.categories import CategoryRepo
 from app.services.categories import CategoryService
 from app.services.errors import ValidationError
-from app.utils.messages import edit_or_send, render_step
+from app.utils.messages import confirm_step, edit_or_send, render_step
 
 router = Router()
 
@@ -70,7 +75,7 @@ async def cat_cancel(cb: CallbackQuery, state):
 async def cat_delmenu(cb: CallbackQuery, session, user: User):
     custom = await CategoryRepo(session).list_custom(user.id)
     rows = [[(f"{c.icon or '•'} {c.name}", f"cat:del:{c.id}")] for c in custom]
-    rows.append([_btn("⬅️ Kembali", "cat:back")])
+    rows.append([("⬅️ Kembali", "cat:back")])
     await cb.message.edit_text(
         "🗑 Pilih kategori custom yang mau dihapus (kategori bawaan tidak bisa dihapus):",
         reply_markup=ikb(rows),
@@ -104,7 +109,8 @@ async def cat_del_execute(cb: CallbackQuery, session, user: User):
 @router.callback_query(F.data == "cat:add")
 async def cat_add(cb: CallbackQuery, state):
     await state.set_state(CategoryStates.choosing_type)
-    await state.update_data(msg_id=None)
+    # ingat pesan menu asal — di-refresh di tempat saat kategori selesai dibuat
+    await state.update_data(menu_msg_id=cb.message.message_id)
     await render_step(
         cb.message.bot, cb.message.chat.id, state, "🏷️ Tipe kategori baru?",
         ikb([[("💸 Pengeluaran", "cat:t:expense"), ("💰 Pemasukan", "cat:t:income")],
@@ -120,6 +126,9 @@ async def cat_choose_type(cb: CallbackQuery, state):
         return await cb.answer("Tipe tidak valid.", show_alert=True)
     await state.update_data(cat_type=type_)
     await state.set_state(CategoryStates.entering_name)
+    label, icon = TYPE_LABELS[type_]
+    await confirm_step(cb.message.bot, cb.message.chat.id, state,
+                       f"Anda memilih: {icon} {label}")
     await render_step(
         cb.message.bot, cb.message.chat.id, state, "🏷️ Nama kategori (mis. <b>Ngopi</b>):",
         ikb([[("❌ Batal", "cat:cancel")]]),
@@ -129,8 +138,10 @@ async def cat_choose_type(cb: CallbackQuery, state):
 
 @router.message(CategoryStates.entering_name)
 async def cat_enter_name(message: Message, state):
-    await state.update_data(cat_name=message.text.strip()[:100])
+    name = message.text.strip()[:100]
+    await state.update_data(cat_name=name)
     await state.set_state(CategoryStates.entering_keywords)
+    await confirm_step(message.bot, message.chat.id, state, f"🏷️ {name}")
     await render_step(
         message.bot, message.chat.id, state,
         "🔑 Keyword untuk AI (opsional, pisahkan dengan koma):\n"
@@ -146,8 +157,9 @@ async def cat_skip_keywords(cb: CallbackQuery, state, session, user: User):
         await CategoryService(session).create(user.id, data["cat_name"], data["cat_type"], None)
     except ValidationError as e:
         return await cb.answer(f"⚠️ {e}", show_alert=True)
+    await confirm_step(cb.message.bot, cb.message.chat.id, state, "⏭️ Tanpa keyword")
     await state.clear()
-    await _render_menu(cb.message.bot, cb.message.chat.id, cb.message.message_id, session, user)
+    await _render_menu(cb.message.bot, cb.message.chat.id, data.get("menu_msg_id"), session, user)
     await cb.answer("Kategori dibuat ✅")
 
 
@@ -161,5 +173,7 @@ async def cat_enter_keywords(message: Message, state, session, user: User):
     except ValidationError as e:
         await message.answer(f"⚠️ {e}")
         return
+    await confirm_step(message.bot, message.chat.id, state,
+                       f"🔑 {message.text.strip()[:100]}")
     await state.clear()
-    await _render_menu(message.bot, message.chat.id, None, session, user)
+    await _render_menu(message.bot, message.chat.id, data.get("menu_msg_id"), session, user)
