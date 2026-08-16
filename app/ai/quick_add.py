@@ -1,0 +1,176 @@
+"""Quick-add via AI (PRD §5.1b): parsing teks bebas / foto struk → draft terstruktur.
+
+Output AI hanyalah *tebakan* — user WAJIB konfirmasi lewat kartu (handlers.quick_add).
+Kalau AI menilai bukan transaksi / ragu → action "unclear", bot tidak memaksakan.
+"""
+
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.ai import client
+from app.db.models import Category, Wallet
+from app.repositories.categories import CategoryRepo
+from app.repositories.wallets import WalletRepo
+
+SYSTEM_PROMPT = """Kamu adalah parser keuangan untuk bot pencatatan keuangan pribadi.
+Tugasmu: menganalisis pesan pengguna dan menentukan apakah itu transaksi keuangan, transfer antar wallet, atau bukan transaksi.
+
+PENTING: Jangan menebak transaksi kalau pesannya BUKAN tentang keuangan (sapaan, pertanyaan, curhat, dll). Dalam kasus itu set "action" = "unclear".
+
+Output HARUS berupa objek JSON dengan skema persis:
+{
+  "action": "transaction" | "transfer" | "unclear",
+  "type": "income" | "expense",
+  "amount": 25000,
+  "category_guess": "Makan & Minum",
+  "wallet_guess": "Cash",
+  "from_wallet_guess": "Cash",
+  "to_wallet_guess": "GoPay",
+  "note": "beli kopi di Indomaret",
+  "confidence": "high" | "low"
+}
+
+Aturan:
+- "transaction" = uang masuk/keluar; "transfer" = uang hanya pindah antar wallet (kata kunci: transfer, pindah, move). Untuk transfer isi from_wallet_guess & to_wallet_guess.
+- amount: angka Rupiah tanpa titik/koma. Pahami singkatan: 25rb = 25000, 2jt = 2000000, 5k = 5000.
+- category_guess: pilih nama kategori PALING sesuai dari daftar yang diberikan. Kalau tidak ada yang cocok gunakan "Lainnya".
+- wallet_guess / from_wallet_guess / to_wallet_guess: nama wallet dari daftar. Kosongkan ("") kalau tidak disebut.
+- confidence: "low" kalau kamu ragu ini transaksi atau nominal tidak jelas.
+- note: deskripsi singkat Bahasa Indonesia maks 100 karakter, boleh kosong.
+- Untuk foto struk: baca nominal TOTAL & nama merchant dari struk."""
+
+
+@dataclass
+class QuickAddResult:
+    action: str  # transaction | transfer | unclear
+    type: str | None
+    amount: Decimal | None
+    category_guess: str | None
+    wallet_guess: str | None
+    from_wallet_guess: str | None
+    to_wallet_guess: str | None
+    note: str | None
+    confidence: str | None
+
+    @property
+    def is_unclear(self) -> bool:
+        if self.action not in ("transaction", "transfer") or self.confidence == "low":
+            return True
+        if self.amount is None:
+            return True
+        if self.action == "transaction" and self.type is None:
+            return True
+        return False
+
+
+async def build_context(session: AsyncSession, user_id: int) -> str:
+    """Daftar kategori & wallet milik user sebagai context untuk AI (PRD §5.1b)."""
+    categories = await CategoryRepo(session).list_for_user(user_id)
+    wallets = await WalletRepo(session).list_by_user(user_id, active_only=True)
+
+    lines = ["Daftar kategori:"]
+    for t, label in (("expense", "Pengeluaran"), ("income", "Pemasukan")):
+        cats = [c for c in categories if c.type == t]
+        names = [f"{c.name}" + (f" (keywords: {', '.join(c.keywords)})" if c.keywords else "") for c in cats]
+        lines.append(f"- {label}: {'; '.join(names)}")
+    lines.append("")
+    wallet_names = ", ".join(w.name for w in wallets) or "(belum ada)"
+    lines.append(f"Daftar wallet: {wallet_names}")
+    return "\n".join(lines)
+
+
+async def _parse_result(data: dict) -> QuickAddResult:
+    action = str(data.get("action", "unclear")).strip().lower()
+    type_ = str(data.get("type") or "").strip().lower()
+    if type_ not in ("income", "expense"):
+        type_ = None
+    try:
+        amount = Decimal(str(data.get("amount"))).quantize(Decimal("0.01"))
+        if amount <= 0:
+            amount = None
+    except (InvalidOperation, ValueError, TypeError):
+        amount = None
+    return QuickAddResult(
+        action=action,
+        type=type_,
+        amount=amount,
+        category_guess=(data.get("category_guess") or "").strip() or None,
+        wallet_guess=(data.get("wallet_guess") or "").strip() or None,
+        from_wallet_guess=(data.get("from_wallet_guess") or "").strip() or None,
+        to_wallet_guess=(data.get("to_wallet_guess") or "").strip() or None,
+        note=(str(data.get("note") or "").strip()[:200] or None),
+        confidence=str(data.get("confidence") or "low").strip().lower(),
+    )
+
+
+async def parse_text(session: AsyncSession, user_id: int, text: str) -> QuickAddResult:
+    context = await build_context(session, user_id)
+    data = await client.complete_json(
+        session,
+        [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": f"{context}\n\nPesan user: {text}"},
+        ],
+    )
+    return await _parse_result(data)
+
+
+async def parse_image(session: AsyncSession, user_id: int, image_b64: str) -> QuickAddResult:
+    context = await build_context(session, user_id)
+    data = await client.complete_json(
+        session,
+        [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": f"{context}\n\nFoto struk/nota di atas. Analisis isinya."},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"},
+                    },
+                ],
+            },
+        ],
+    )
+    return await _parse_result(data)
+
+
+def _match_name(name: str, guess: str) -> bool:
+    return guess and (name.lower() == guess.lower() or name.lower() in guess.lower() or guess.lower() in name.lower())
+
+
+async def resolve_category(session: AsyncSession, user_id: int, guess: str | None, type_: str) -> Category:
+    """Cocokkan tebakan kategori AI → kategori user/global. Fallback: 'Lainnya'.'"""
+    repo = CategoryRepo(session)
+    categories = [c for c in await repo.list_for_user(user_id) if c.type == type_]
+    if guess:
+        for c in categories:
+            if _match_name(c.name, guess):
+                return c
+        for c in categories:
+            for kw in c.keywords or []:
+                if kw.lower() in guess.lower():
+                    return c
+    fallback = await repo.get_global_fallback(type_)
+    if fallback:
+        return fallback
+    # jaga-jaga kalau seed belum jalan
+    return await repo.create(None, "Lainnya", type_, "📦", [])
+
+
+async def resolve_wallet(session: AsyncSession, user_id: int, guess: str | None) -> Wallet | None:
+    """Cocokkan tebakan wallet → wallet user. Fallback: wallet default."""
+    wallets = await WalletRepo(session).list_by_user(user_id, active_only=True)
+    if not wallets:
+        return None
+    if guess:
+        for w in wallets:
+            if _match_name(w.name, guess):
+                return w
+    for w in wallets:
+        if w.is_default:
+            return w
+    return wallets[0]
