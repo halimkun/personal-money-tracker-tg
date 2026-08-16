@@ -49,9 +49,9 @@ async def _render_panel(bot, chat_id: int, message_id: int | None, session):
     lines = [
         "🛠️ <b>Panel Admin</b>",
         "",
-        f"Mode berbayar: {'🔴 aktif' if await svc.payment_required() else '🟢 nonaktif'} · "
+        f"Mode berbayar: {'🟢 aktif' if await svc.payment_required() else '🔴 nonaktif'}",
         f"kuota free: {await svc.free_limit()}/bulan",
-        f"Insight AI global: {'🟢' if await svc.insight_enabled_global() else '🔴'}",
+        f"Insight AI global: {'🟢 aktif' if await svc.insight_enabled_global() else '🔴 nonaktif'}",
         "",
         "Pilih menu:",
     ]
@@ -113,7 +113,8 @@ async def cmd_broadcast(message: Message, state, user: User):
 async def adm_stats(cb: CallbackQuery, session, user: User):
     if not is_admin(user.telegram_id):
         return await cb.answer("Akses ditolak.", show_alert=True)
-    await cb.message.edit_text(await build_stats_text(session))
+    await cb.message.edit_text(await build_stats_text(session),
+                               reply_markup=ikb([[("⬅️ Kembali", "adm:back")]]))
     await cb.answer()
 
 
@@ -144,6 +145,7 @@ async def adm_users(cb: CallbackQuery, session, user: User):
         nav.append(("▶️", f"adm:users:{page + 1}"))
     if nav:
         rows.append(nav)
+    rows.append([("⬅️ Kembali", "adm:back")])
     await cb.message.edit_text("\n".join(lines), reply_markup=ikb(rows))
     await cb.answer()
 
@@ -161,7 +163,7 @@ async def adm_user_detail(cb: CallbackQuery, session, user: User):
         f"Telegram: {target.telegram_id} (@{target.username or '—'})",
         f"Premium: {'⭐ ' + premium if target.is_premium else '❌ Free'}",
         f"Kuota free terpakai: {target.free_transaction_count}",
-        f"Insight AI: {'🟢' if target.ai_insight_enabled else '🔴'}",
+        f"Insight AI: {'🟢 aktif' if target.ai_insight_enabled else '🔴 nonaktif'}",
         f"Aktif: {'✅' if target.is_active else '❌'} · terdaftar {fmt_datetime(target.created_at)}",
     ]
     rows = []
@@ -190,7 +192,8 @@ async def adm_pending(cb: CallbackQuery, session, user: User):
         return await cb.answer("Akses ditolak.", show_alert=True)
     items = await PaymentRepo(session).list_pending()
     if not items:
-        await cb.message.edit_text("💳 Tidak ada pembayaran pending. 🎉")
+        await cb.message.edit_text("💳 Tidak ada pembayaran pending. 🎉",
+                                   reply_markup=ikb([[("⬅️ Kembali", "adm:back")]]))
         return await cb.answer()
     token_svc = CallbackRefService(session)
     lines = [f"💳 <b>Pembayaran Pending</b> ({len(items)})", ""]
@@ -211,6 +214,7 @@ async def adm_pending(cb: CallbackQuery, session, user: User):
             (f"✅ #{p.id}", f"ap:{approve_token}"),
             (f"❌ #{p.id}", f"ap:{reject_token}"),
         ])
+    rows.append([("⬅️ Kembali", "adm:back")])
     await cb.message.edit_text("\n".join(lines), reply_markup=ikb(rows))
     await cb.answer()
 
@@ -480,7 +484,7 @@ async def adm_sett_menu(cb: CallbackQuery, session, user: User):
         "",
         f"Mode berbayar: {'🔴 aktif' if await svc.payment_required() else '🟢 nonaktif'}",
         f"Kuota free: {await svc.free_limit()} transaksi/bulan",
-        f"Insight AI global: {'🟢' if await svc.insight_enabled_global() else '🔴'}",
+        f"Insight AI global: {'🟢 aktif' if await svc.insight_enabled_global() else '🔴 nonaktif'}",
         f"Harga premium: {format_rupiah(price)} / {days} hari",
         f"Instruksi bayar: {await svc.payment_instructions()}",
     ]
@@ -600,7 +604,7 @@ async def _rerender_sett(bot, chat_id: int, message_id: int | None, session):
         "",
         f"Mode berbayar: {'🔴 aktif' if await svc.payment_required() else '🟢 nonaktif'}",
         f"Kuota free: {await svc.free_limit()} transaksi/bulan",
-        f"Insight AI global: {'🟢' if await svc.insight_enabled_global() else '🔴'}",
+        f"Insight AI global: {'🟢 aktif' if await svc.insight_enabled_global() else '🔴 nonaktif'}",
         f"Harga premium: {format_rupiah(price)} / {days} hari",
         f"Instruksi bayar: {await svc.payment_instructions()}",
     ]
