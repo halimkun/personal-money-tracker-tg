@@ -11,7 +11,7 @@ lewat render_step(edit=True), dan kartu selalu menampilkan nilai hasil koreksi.
 """
 
 import base64
-from datetime import timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 
 from aiogram import F, Router
@@ -35,7 +35,7 @@ from app.services.settings import SettingsService
 from app.services.transactions import TransactionService
 from app.services.transfers import TransferService
 from app.texts.id import MSG_AI_FAIL, MSG_AI_LIMIT, MSG_AI_UNCLEAR, MSG_FREEMIUM_BLOCKED
-from app.utils.format import now_utc_naive, today_local
+from app.utils.format import fmt_date_short, now_utc_naive, today_local
 from app.utils.messages import edit_or_send, render_step
 
 router = Router()
@@ -44,6 +44,25 @@ CAT_PER_PAGE = 10
 
 
 # ============================== Kartu konfirmasi ==============================
+
+def _card_date(data: dict) -> str:
+    """Tanggal kartu: dari AI (qa_date) atau 'Hari ini'."""
+    qa_date = data.get("qa_date")
+    return fmt_date_short(date.fromisoformat(qa_date)) if qa_date else "Hari ini"
+
+
+def _clamp_date(date_iso: str | None) -> str | None:
+    """Validasi tanggal AI: ISO valid & maksimal ±365 hari dari hari ini."""
+    if not date_iso:
+        return None
+    try:
+        d = date.fromisoformat(date_iso)
+    except ValueError:
+        return None
+    if abs((d - today_local()).days) > 365:
+        return None
+    return d.isoformat()
+
 
 def _card_text(data: dict) -> str:
     if data["qa_action"] == "transaction":
@@ -54,7 +73,7 @@ def _card_text(data: dict) -> str:
             f"Jumlah: <b>{format_rupiah(Decimal(data['qa_amount']))}</b>",
             f"Kategori: {data['qa_category_name']}",
             f"Wallet: {data['qa_wallet_name']}",
-            "Tanggal: Hari ini",
+            f"Tanggal: {_card_date(data)}",
         ]
     else:
         lines = [
@@ -62,6 +81,7 @@ def _card_text(data: dict) -> str:
             f"Dari: {data['qa_from_name']}",
             f"Ke: {data['qa_to_name']}",
             f"Jumlah: <b>{format_rupiah(Decimal(data['qa_amount']))}</b>",
+            f"Tanggal: {_card_date(data)}",
         ]
     if data.get("qa_note"):
         lines.append(f"Catatan: {data['qa_note']}")
@@ -98,6 +118,7 @@ async def _handle_result(bot, chat_id: int, state, session, user: User, result,
         await bot.send_message(chat_id, MSG_AI_UNCLEAR)
         return
 
+    qa_date = _clamp_date(result.date_iso)
     if result.action == "transaction":
         if result.type is None:
             await bot.send_message(chat_id, MSG_AI_UNCLEAR)
@@ -123,6 +144,7 @@ async def _handle_result(bot, chat_id: int, state, session, user: User, result,
             qa_wallet_id=wallet.id,
             qa_wallet_name=_name_with_icon(wallet),
             qa_note=result.note,
+            qa_date=qa_date,
         )
     else:  # transfer
         fw = await qa_ai.resolve_wallet(session, user.id, result.from_wallet_guess)
@@ -145,6 +167,7 @@ async def _handle_result(bot, chat_id: int, state, session, user: User, result,
             qa_from_id=fw.id, qa_from_name=_name_with_icon(fw),
             qa_to_id=tw.id, qa_to_name=_name_with_icon(tw),
             qa_note=result.note,
+            qa_date=qa_date,
         )
 
     data.update(qa_source=source, qa_source_file_id=source_file_id, msg_id=None)
@@ -217,7 +240,7 @@ async def qa_save(cb: CallbackQuery, state, session, user: User):
                 category_id=data["qa_category_id"],
                 wallet_id=data["qa_wallet_id"],
                 note=data.get("qa_note"),
-                occurred_at=today_local(),
+                occurred_at=date.fromisoformat(data["qa_date"]) if data.get("qa_date") else today_local(),
                 source=data.get("qa_source", "ai_text"),
                 source_file_id=data.get("qa_source_file_id"),
             )
@@ -245,7 +268,7 @@ async def qa_save(cb: CallbackQuery, state, session, user: User):
                 to_wallet_id=data["qa_to_id"],
                 amount=Decimal(data["qa_amount"]),
                 note=data.get("qa_note"),
-                occurred_at=today_local(),
+                occurred_at=date.fromisoformat(data["qa_date"]) if data.get("qa_date") else today_local(),
             )
         except ValidationError as e:
             return await cb.answer(f"⚠️ {e}", show_alert=True)

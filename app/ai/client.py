@@ -5,12 +5,13 @@
 - penggunaan (calls + token) dicatat untuk pemantauan biaya di /stats
 """
 
+import asyncio
 import json
 import logging
 import re
 from datetime import date
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, RateLimitError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.settings import SettingsService
@@ -55,11 +56,22 @@ async def track_usage(session: AsyncSession, usage) -> None:
         await repo.incr_int(f"ai_completion_tokens_{month}", usage.completion_tokens or 0)
 
 
+async def _create_with_retry(client: AsyncOpenAI, **kwargs):
+    """Retry singkat untuk rate limit (provider gratis sering 429)."""
+    for attempt in range(3):
+        try:
+            return await client.chat.completions.create(**kwargs)
+        except RateLimitError:
+            if attempt == 2:
+                raise
+            await asyncio.sleep(2 * (attempt + 1))
+
+
 async def complete_text(session: AsyncSession, messages: list[dict], *, temperature: float = 0.3) -> str:
     client, model = await get_client(session)
     try:
-        resp = await client.chat.completions.create(
-            model=model, messages=messages, temperature=temperature,
+        resp = await _create_with_retry(
+            client, model=model, messages=messages, temperature=temperature,
         )
     except Exception as e:
         raise AIError(f"AI request gagal: {e}") from e
@@ -70,7 +82,8 @@ async def complete_text(session: AsyncSession, messages: list[dict], *, temperat
 async def complete_json(session: AsyncSession, messages: list[dict], *, temperature: float = 0.0) -> dict:
     client, model = await get_client(session)
     try:
-        resp = await client.chat.completions.create(
+        resp = await _create_with_retry(
+            client,
             model=model,
             messages=messages,
             temperature=temperature,

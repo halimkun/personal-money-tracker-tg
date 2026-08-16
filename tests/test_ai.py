@@ -64,6 +64,24 @@ class TestParseText:
         result = await qa.parse_text(session, user.id, "makan siang")
         assert result.is_unclear
 
+    async def test_date_extracted(self, session, mock_complete):
+        user = await make_user(session)
+        mock_complete["json"] = {
+            "action": "transaction", "type": "expense", "amount": 50000,
+            "note": "2 kopi kenangan", "date": "2026-08-16", "confidence": "high",
+        }
+        result = await qa.parse_text(session, user.id, "kopi kenangan 2 50000 kemarin")
+        assert result.date_iso == "2026-08-16"
+
+    async def test_date_invalid_ignored(self, session, mock_complete):
+        user = await make_user(session)
+        mock_complete["json"] = {
+            "action": "transaction", "type": "expense", "amount": 50000,
+            "date": "kemarin", "confidence": "high",
+        }
+        result = await qa.parse_text(session, user.id, "beli makan siang")
+        assert result.date_iso is None
+
     async def test_transfer(self, session, mock_complete):
         user = await make_user(session)
         await make_wallet(session, user.id, name="Cash")

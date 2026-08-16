@@ -107,6 +107,19 @@ async def cmd_broadcast(message: Message, state, user: User):
     )
 
 
+@router.callback_query(F.data == "adm:broadcast")
+async def adm_broadcast(cb: CallbackQuery, state, user: User):
+    if not is_admin(user.telegram_id):
+        return await cb.answer("Akses ditolak.", show_alert=True)
+    await state.set_state(BroadcastStates.entering_text)
+    await render_step(
+        cb.message.bot, cb.message.chat.id, state,
+        "📢 Kirim teks broadcast (akan dikirim ke semua user aktif). Ketik /cancel untuk batal.",
+        ikb([[("❌ Batal", "adm:bccancel")]]),
+    )
+    await cb.answer()
+
+
 # ============================== Callback menu =================================
 
 @router.callback_query(F.data == "adm:stats")
@@ -482,7 +495,7 @@ async def adm_sett_menu(cb: CallbackQuery, session, user: User):
     lines = [
         "⚙️ <b>Pengaturan Sistem</b>",
         "",
-        f"Mode berbayar: {'🔴 aktif' if await svc.payment_required() else '🟢 nonaktif'}",
+        f"Mode berbayar: {'🟢 aktif' if await svc.payment_required() else '🔴 nonaktif'}",
         f"Kuota free: {await svc.free_limit()} transaksi/bulan",
         f"Insight AI global: {'🟢 aktif' if await svc.insight_enabled_global() else '🔴 nonaktif'}",
         f"Harga premium: {format_rupiah(price)} / {days} hari",
@@ -602,7 +615,7 @@ async def _rerender_sett(bot, chat_id: int, message_id: int | None, session):
     lines = [
         "⚙️ <b>Pengaturan Sistem</b>",
         "",
-        f"Mode berbayar: {'🔴 aktif' if await svc.payment_required() else '🟢 nonaktif'}",
+        f"Mode berbayar: {'🟢 aktif' if await svc.payment_required() else '🔴 nonaktif'}",
         f"Kuota free: {await svc.free_limit()} transaksi/bulan",
         f"Insight AI global: {'🟢 aktif' if await svc.insight_enabled_global() else '🔴 nonaktif'}",
         f"Harga premium: {format_rupiah(price)} / {days} hari",

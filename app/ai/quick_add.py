@@ -5,11 +5,13 @@ Kalau AI menilai bukan transaksi / ragu → action "unclear", bot tidak memaksak
 """
 
 from dataclasses import dataclass
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.ai import client
+from app.config import settings as app_settings
 from app.db.models import Category, Wallet
 from app.repositories.categories import CategoryRepo
 from app.repositories.wallets import WalletRepo
@@ -29,17 +31,33 @@ Output HARUS berupa objek JSON dengan skema persis:
   "from_wallet_guess": "Cash",
   "to_wallet_guess": "GoPay",
   "note": "beli kopi di Indomaret",
+  "date": "2026-08-16",
   "confidence": "high" | "low"
 }
 
 Aturan:
 - "transaction" = uang masuk/keluar; "transfer" = uang hanya pindah antar wallet (kata kunci: transfer, pindah, move). Untuk transfer isi from_wallet_guess & to_wallet_guess.
 - amount: angka Rupiah tanpa titik/koma. Pahami singkatan: 25rb = 25000, 2jt = 2000000, 5k = 5000.
+- Kalau ada beberapa angka (mis. "kopi kenangan 2 50000"): angka TERAKHIR adalah total transaksi; angka sebelumnya = jumlah barang, catat di note.
+- date: tanggal transaksi dalam format YYYY-MM-DD kalau user menyebut keterangan waktu. Hitung relatif terhadap "Waktu sekarang" yang diberikan di system prompt: kemarin = hari ini - 1 hari, besok = hari ini + 1, lusa = +2, "2 hari lalu" = -2, "minggu lalu" = -7, tanggal/bulan disebut ("17 agustus") = tanggal itu di tahun yang sama. Kalau TIDAK ada keterangan waktu sama sekali → "date": "". Keterangan waktu BUKAN alasan confidence "low" dan TIDAK perlu dimasukkan ke note.
 - category_guess: pilih nama kategori PALING sesuai dari daftar yang diberikan. Kalau tidak ada yang cocok gunakan "Lainnya".
 - wallet_guess / from_wallet_guess / to_wallet_guess: nama wallet dari daftar. Kosongkan ("") kalau tidak disebut.
-- confidence: "low" kalau kamu ragu ini transaksi atau nominal tidak jelas.
+- confidence: "low" HANYA kalau nominal tidak jelas/tidak ada angka sama sekali. Pesan dengan nominal jelas dan konteks transaksi jelas → "high", meskipun ada keterangan waktu atau jumlah barang.
 - note: deskripsi singkat Bahasa Indonesia maks 100 karakter, boleh kosong.
-- Untuk foto struk: baca nominal TOTAL & nama merchant dari struk."""
+- Untuk foto struk: baca nominal TOTAL, tanggal struk & nama merchant dari struk.
+
+Contoh pesan → jawaban benar (asumsi "Waktu sekarang" = 2026-08-17 06:30):
+1. "beli kopi 25rb" → {"action": "transaction", "type": "expense", "amount": 25000, "category_guess": "Makan & Minum", "wallet_guess": "", "from_wallet_guess": "", "to_wallet_guess": "", "note": "beli kopi", "date": "", "confidence": "high"}
+2. "kopi kenangan 2 50000 kemarin" → {"action": "transaction", "type": "expense", "amount": 50000, "category_guess": "Makan & Minum", "wallet_guess": "", "from_wallet_guess": "", "to_wallet_guess": "", "note": "2 kopi kenangan", "date": "2026-08-16", "confidence": "high"}
+3. "gajian 5jt" → {"action": "transaction", "type": "income", "amount": 5000000, "category_guess": "Gaji", "wallet_guess": "", "from_wallet_guess": "", "to_wallet_guess": "", "note": "gajian", "date": "", "confidence": "high"}
+4. "transfer 100rb ke gopay" → {"action": "transfer", "type": null, "amount": 100000, "category_guess": "", "wallet_guess": "", "from_wallet_guess": "", "to_wallet_guess": "GoPay", "note": "transfer ke gopay", "date": "", "confidence": "high"}
+5. "halo" → {"action": "unclear", "type": null, "amount": null, "category_guess": "", "wallet_guess": "", "from_wallet_guess": "", "to_wallet_guess": "", "note": "", "date": "", "confidence": "low"}"""
+
+
+def _system_prompt() -> str:
+    """System prompt + konteks waktu saat ini (untuk hitung tanggal relatif)."""
+    now = datetime.now(app_settings.tz)
+    return SYSTEM_PROMPT + f"\n\nWaktu sekarang: {now:%Y-%m-%d %H:%M} ({app_settings.tz})."
 
 
 @dataclass
@@ -52,6 +70,7 @@ class QuickAddResult:
     from_wallet_guess: str | None
     to_wallet_guess: str | None
     note: str | None
+    date_iso: str | None  # YYYY-MM-DD, None kalau tidak disebut
     confidence: str | None
 
     @property
@@ -81,6 +100,17 @@ async def build_context(session: AsyncSession, user_id: int) -> str:
     return "\n".join(lines)
 
 
+def _parse_date(raw) -> str | None:
+    """Validasi tanggal AI → 'YYYY-MM-DD' atau None kalau tidak valid/kosong."""
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    try:
+        return date.fromisoformat(text).isoformat()
+    except ValueError:
+        return None
+
+
 async def _parse_result(data: dict) -> QuickAddResult:
     action = str(data.get("action", "unclear")).strip().lower()
     type_ = str(data.get("type") or "").strip().lower()
@@ -101,6 +131,7 @@ async def _parse_result(data: dict) -> QuickAddResult:
         from_wallet_guess=(data.get("from_wallet_guess") or "").strip() or None,
         to_wallet_guess=(data.get("to_wallet_guess") or "").strip() or None,
         note=(str(data.get("note") or "").strip()[:200] or None),
+        date_iso=_parse_date(data.get("date")),
         confidence=str(data.get("confidence") or "low").strip().lower(),
     )
 
@@ -110,7 +141,7 @@ async def parse_text(session: AsyncSession, user_id: int, text: str) -> QuickAdd
     data = await client.complete_json(
         session,
         [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": _system_prompt()},
             {"role": "user", "content": f"{context}\n\nPesan user: {text}"},
         ],
     )
@@ -122,7 +153,7 @@ async def parse_image(session: AsyncSession, user_id: int, image_b64: str) -> Qu
     data = await client.complete_json(
         session,
         [
-            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content": _system_prompt()},
             {
                 "role": "user",
                 "content": [

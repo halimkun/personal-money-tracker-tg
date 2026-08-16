@@ -298,3 +298,83 @@ class TestDispatch:
 
         sent = api_calls(SendMessage)
         assert any("Budget" in (m.text or "") for m in sent)  # menu dirender tanpa ValueError
+
+    async def test_admin_broadcast_button_starts_flow(self, app_dispatcher, session_factory,
+                                                      monkeypatch):
+        """Regression: tombol 📢 Broadcast di panel admin memulai flow broadcast —
+        tidak jatuh ke catch-all 'tombol sudah tidak berlaku'."""
+        from app.config import settings as app_settings
+
+        monkeypatch.setattr(app_settings, "admin_ids", "123")
+        dp, _ = app_dispatcher
+        dp["session_factory"] = session_factory
+        async with session_factory() as s:
+            await make_user(s, tg_id=123)
+            await s.commit()
+        bot = await make_bot(monkeypatch)
+
+        await dp.feed_update(bot, Update(update_id=1, message=make_msg(123, 123, "/admin")))
+        cb = CallbackQuery(
+            id="1",
+            from_user=TgUser(id=123, is_bot=False, first_name="Tester"),
+            chat_instance="ci",
+            message=make_msg(123, 123, "junk"),
+            data="adm:broadcast",
+        )
+        await dp.feed_update(bot, Update(update_id=2, callback_query=cb))
+
+        sent = api_calls(SendMessage)
+        assert any("Kirim teks broadcast" in (m.text or "") for m in sent)
+
+    async def test_quick_add_ai_date_yesterday(self, app_dispatcher, session_factory, monkeypatch):
+        """AI menyebut 'kemarin' → kartu menampilkan tanggal kemarin,
+        simpan transaksi memakai tanggal itu (bukan hari ini)."""
+        from datetime import timedelta
+
+        from sqlalchemy import select
+
+        from app.ai import client as ai_client
+        from app.db.models import Transaction
+        from app.utils.format import today_local
+
+        yesterday = (today_local() - timedelta(days=1)).isoformat()
+
+        async def fake_complete_json(session, messages, *, temperature=0.0):
+            return {"action": "transaction", "type": "expense", "amount": 50000,
+                    "category_guess": "Makan & Minum", "wallet_guess": "",
+                    "note": "2 kopi kenangan", "date": yesterday, "confidence": "high"}
+
+        monkeypatch.setattr(ai_client, "complete_json", fake_complete_json)
+
+        dp, storage = app_dispatcher
+        dp["session_factory"] = session_factory
+        async with session_factory() as s:
+            u = await make_user(s, tg_id=123)
+            await make_wallet(s, u.id)
+            await s.commit()
+        bot = await make_bot(monkeypatch)
+        # storage dishare antar test — pastikan chat ini bebas FSM sisa
+        ctx = FSMContext(storage=storage, key=StorageKey(bot_id=bot.id, chat_id=123, user_id=123))
+        await ctx.clear()
+
+        await dp.feed_update(bot, Update(update_id=1,
+                                         message=make_msg(123, 123, "kopi kenangan 2 50000 kemarin")))
+
+        sent = api_calls(SendMessage)
+        card = next(m for m in sent if "Transaksi Terdeteksi" in (m.text or ""))
+        assert "Tanggal:" in card.text
+        assert "Hari ini" not in card.text  # tanggal kemarin, bukan hari ini
+
+        cb = CallbackQuery(
+            id="1",
+            from_user=TgUser(id=123, is_bot=False, first_name="Tester"),
+            chat_instance="ci",
+            message=make_msg(123, 123, "junk"),
+            data="qa:save",
+        )
+        await dp.feed_update(bot, Update(update_id=2, callback_query=cb))
+
+        async with session_factory() as s:
+            txs = (await s.execute(select(Transaction))).scalars().all()
+        assert len(txs) == 1
+        assert txs[0].occurred_at.isoformat() == yesterday
