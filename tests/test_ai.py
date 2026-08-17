@@ -82,6 +82,35 @@ class TestParseText:
         result = await qa.parse_text(session, user.id, "beli makan siang")
         assert result.date_iso is None
 
+    async def test_multi_items(self, session, mock_complete):
+        user = await make_user(session)
+        mock_complete["json"] = {
+            "action": "multi", "confidence": "high",
+            "items": [
+                {"type": "expense", "amount": 50000, "category_guess": "Makan & Minum",
+                 "note": "2 kopi kenangan", "date": "2026-08-16"},
+                {"type": "expense", "amount": 60000, "category_guess": "Makan & Minum",
+                 "note": "2 KFC", "date": "2026-08-16"},
+            ],
+        }
+        result = await qa.parse_text(
+            session, user.id, "kemarin\nkopi kenangan 2 50000\nKFC 2 60000"
+        )
+        assert not result.is_unclear
+        assert len(result.items) == 2
+        assert result.items[0].amount == Decimal("50000.00")
+        assert result.items[0].note == "2 kopi kenangan"
+        assert result.items[1].date_iso == "2026-08-16"
+
+    async def test_multi_no_valid_items_unclear(self, session, mock_complete):
+        user = await make_user(session)
+        mock_complete["json"] = {
+            "action": "multi", "confidence": "high",
+            "items": [{"type": "expense", "amount": None}],
+        }
+        result = await qa.parse_text(session, user.id, "daftar belanja")
+        assert result.is_unclear
+
     async def test_transfer(self, session, mock_complete):
         user = await make_user(session)
         await make_wallet(session, user.id, name="Cash")

@@ -378,3 +378,180 @@ class TestDispatch:
             txs = (await s.execute(select(Transaction))).scalars().all()
         assert len(txs) == 1
         assert txs[0].occurred_at.isoformat() == yesterday
+
+    async def test_quick_add_multi_items_queue(self, app_dispatcher, session_factory, monkeypatch):
+        """Pesan multi-item → kartu per item berurutan (1/2 → 2/2), semua tersimpan."""
+        from sqlalchemy import select
+
+        from app.ai import client as ai_client
+        from app.db.models import Transaction
+
+        async def fake_complete_json(session, messages, *, temperature=0.0):
+            return {"action": "multi", "confidence": "high",
+                    "items": [
+                        {"type": "expense", "amount": 50000,
+                         "category_guess": "Makan & Minum", "note": "2 kopi kenangan"},
+                        {"type": "expense", "amount": 60000,
+                         "category_guess": "Makan & Minum", "note": "2 KFC"},
+                    ]}
+
+        monkeypatch.setattr(ai_client, "complete_json", fake_complete_json)
+
+        dp, storage = app_dispatcher
+        dp["session_factory"] = session_factory
+        async with session_factory() as s:
+            u = await make_user(s, tg_id=123)
+            await make_wallet(s, u.id)
+            await s.commit()
+        bot = await make_bot(monkeypatch)
+        ctx = FSMContext(storage=storage, key=StorageKey(bot_id=bot.id, chat_id=123, user_id=123))
+        await ctx.clear()
+
+        await dp.feed_update(bot, Update(
+            update_id=1,
+            message=make_msg(123, 123, "kemarin\nkopi kenangan 2 50000\nKFC 2 60000"),
+        ))
+
+        sent = api_calls(SendMessage)
+        card1 = next(m for m in sent if "Transaksi Terdeteksi" in (m.text or ""))
+        assert "(1/2)" in card1.text
+        assert "Rp 50.000" in card1.text
+
+        for i in (1, 2):  # dua kali save
+            cb = CallbackQuery(
+                id=str(i),
+                from_user=TgUser(id=123, is_bot=False, first_name="Tester"),
+                chat_instance="ci",
+                message=make_msg(123, 123, "junk"),
+                data="qa:save",
+            )
+            await dp.feed_update(bot, Update(update_id=1 + i, callback_query=cb))
+
+        edits = api_calls(EditMessageText)
+        assert any("(2/2)" in (m.text or "") for m in edits)  # kartu kedua muncul
+        assert any("✅ Tersimpan!" in (m.text or "") for m in edits)  # final
+
+        async with session_factory() as s:
+            txs = (await s.execute(select(Transaction))).scalars().all()
+        assert len(txs) == 2
+        assert sorted(t.amount for t in txs) == [50000.00, 60000.00]
+
+    async def test_quick_add_multi_skip_one_item(self, app_dispatcher, session_factory, monkeypatch):
+        """⏭️ Lewati Item di kartu multi → hanya item itu yang dibatalkan, sisanya jalan."""
+        from sqlalchemy import select
+
+        from app.ai import client as ai_client
+        from app.db.models import Transaction
+
+        async def fake_complete_json(session, messages, *, temperature=0.0):
+            return {"action": "multi", "confidence": "high",
+                    "items": [
+                        {"type": "expense", "amount": 50000,
+                         "category_guess": "Makan & Minum", "note": "2 kopi kenangan"},
+                        {"type": "expense", "amount": 60000,
+                         "category_guess": "Makan & Minum", "note": "2 KFC"},
+                    ]}
+
+        monkeypatch.setattr(ai_client, "complete_json", fake_complete_json)
+
+        dp, storage = app_dispatcher
+        dp["session_factory"] = session_factory
+        async with session_factory() as s:
+            u = await make_user(s, tg_id=123)
+            await make_wallet(s, u.id)
+            await s.commit()
+        bot = await make_bot(monkeypatch)
+        ctx = FSMContext(storage=storage, key=StorageKey(bot_id=bot.id, chat_id=123, user_id=123))
+        await ctx.clear()
+
+        await dp.feed_update(bot, Update(
+            update_id=1,
+            message=make_msg(123, 123, "kemarin\nkopi kenangan 2 50000\nKFC 2 60000"),
+        ))
+
+        sent = api_calls(SendMessage)
+        card1 = next(m for m in sent if "Transaksi Terdeteksi" in (m.text or ""))
+        assert "(1/2)" in card1.text
+        buttons = [b.text for row in card1.reply_markup.inline_keyboard for b in row]
+        assert "⏭️ Lewati Item" in buttons
+        assert "❌ Batal" in buttons  # batal tetap = batal SEMUA antrian
+
+        skip = CallbackQuery(
+            id="10",
+            from_user=TgUser(id=123, is_bot=False, first_name="Tester"),
+            chat_instance="ci",
+            message=make_msg(123, 123, "junk"),
+            data="qa:skip",
+        )
+        await dp.feed_update(bot, Update(update_id=2, callback_query=skip))
+
+        edits = api_calls(EditMessageText)
+        assert any("(2/2)" in (m.text or "") for m in edits)  # kartu item 2 muncul
+        assert any("Rp 60.000" in (m.text or "") for m in edits)
+
+        save = CallbackQuery(
+            id="11",
+            from_user=TgUser(id=123, is_bot=False, first_name="Tester"),
+            chat_instance="ci",
+            message=make_msg(123, 123, "junk"),
+            data="qa:save",
+        )
+        await dp.feed_update(bot, Update(update_id=3, callback_query=save))
+        edits = api_calls(EditMessageText)
+        assert any("✅ Tersimpan!" in (m.text or "") for m in edits)
+
+        async with session_factory() as s:
+            txs = (await s.execute(select(Transaction))).scalars().all()
+        assert len(txs) == 1  # item 1 dilewati, hanya item 2 tersimpan
+        assert txs[0].amount == 60000.00
+
+    async def test_quick_add_multi_skip_last_item_cancels(self, app_dispatcher, session_factory, monkeypatch):
+        """Lewati item terakhir (antrian habis) → kartu ditutup, tidak ada yang tersimpan."""
+        from sqlalchemy import select
+
+        from app.ai import client as ai_client
+        from app.db.models import Transaction
+
+        async def fake_complete_json(session, messages, *, temperature=0.0):
+            return {"action": "multi", "confidence": "high",
+                    "items": [
+                        {"type": "expense", "amount": 50000,
+                         "category_guess": "Makan & Minum", "note": "2 kopi kenangan"},
+                        {"type": "expense", "amount": 60000,
+                         "category_guess": "Makan & Minum", "note": "2 KFC"},
+                    ]}
+
+        monkeypatch.setattr(ai_client, "complete_json", fake_complete_json)
+
+        dp, storage = app_dispatcher
+        dp["session_factory"] = session_factory
+        async with session_factory() as s:
+            u = await make_user(s, tg_id=123)
+            await make_wallet(s, u.id)
+            await s.commit()
+        bot = await make_bot(monkeypatch)
+        ctx = FSMContext(storage=storage, key=StorageKey(bot_id=bot.id, chat_id=123, user_id=123))
+        await ctx.clear()
+
+        await dp.feed_update(bot, Update(
+            update_id=1,
+            message=make_msg(123, 123, "kemarin\nkopi kenangan 2 50000\nKFC 2 60000"),
+        ))
+
+        # kartu item 1 dilewati → kartu item 2 muncul → juga dilewati → antrian habis
+        for i in (2, 3):
+            skip = CallbackQuery(
+                id=str(i),
+                from_user=TgUser(id=123, is_bot=False, first_name="Tester"),
+                chat_instance="ci",
+                message=make_msg(123, 123, "junk"),
+                data="qa:skip",
+            )
+            await dp.feed_update(bot, Update(update_id=i, callback_query=skip))
+
+        edits = api_calls(EditMessageText)
+        assert any("❌ Dibatalkan." in (m.text or "") for m in edits)
+
+        async with session_factory() as s:
+            txs = (await s.execute(select(Transaction))).scalars().all()
+        assert len(txs) == 0

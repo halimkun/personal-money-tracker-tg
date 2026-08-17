@@ -65,10 +65,12 @@ def _clamp_date(date_iso: str | None) -> str | None:
 
 
 def _card_text(data: dict) -> str:
+    progress = (f" ({data.get('qa_pos', 1)}/{data.get('qa_total', 1)})"
+                if data.get("qa_total", 1) > 1 else "")
     if data["qa_action"] == "transaction":
         label, icon = ("Pemasukan", "💰") if data["qa_type"] == "income" else ("Pengeluaran", "💸")
         lines = [
-            "🤖 <b>Transaksi Terdeteksi</b>",
+            f"🤖 <b>Transaksi Terdeteksi</b>{progress}",
             f"{icon} {label}",
             f"Jumlah: <b>{format_rupiah(Decimal(data['qa_amount']))}</b>",
             f"Kategori: {data['qa_category_name']}",
@@ -91,7 +93,7 @@ def _card_text(data: dict) -> str:
 
 def _card_kb(data: dict):
     kind = "transaction" if data["qa_action"] == "transaction" else "transfer"
-    return quick_add_card_kb(kind)
+    return quick_add_card_kb(kind, multi=data.get("qa_total", 1) > 1)
 
 
 async def _render_card(bot, chat_id: int, state) -> None:
@@ -111,15 +113,52 @@ async def _has_wallets(session, user: User) -> bool:
     return bool(await WalletRepo(session).list_by_user(user.id, active_only=True))
 
 
+async def _resolve_item_data(session, user: User, item) -> dict | None:
+    """Resolusi satu item multi → data kartu; None kalau tidak bisa disimpan."""
+    category = await qa_ai.resolve_category(session, user.id, item.category_guess, item.type)
+    wallet = await qa_ai.resolve_wallet(session, user.id, item.wallet_guess)
+    if not wallet:
+        return None
+    return dict(
+        qa_action="transaction",
+        qa_type=item.type,
+        qa_amount=str(item.amount),
+        qa_category_id=category.id,
+        qa_category_name=f"{category.icon or ''} {category.name}".strip(),
+        qa_wallet_id=wallet.id,
+        qa_wallet_name=_name_with_icon(wallet),
+        qa_note=item.note,
+        qa_date=_clamp_date(item.date_iso),
+    )
+
+
 async def _handle_result(bot, chat_id: int, state, session, user: User, result,
                          *, source: str, source_file_id: str | None = None) -> None:
-    """PRD §5.1b poin 3-5: unclear → balas singkat; jelas → kartu konfirmasi."""
-    if result.is_unclear or result.amount is None:
+    """PRD §5.1b poin 3-5: unclear → balas singkat; jelas → kartu konfirmasi.
+
+    Multi-item: satu kartu per transaksi, dikonfirmasi berurutan (qa_queue).
+    """
+    if result.is_unclear:
         await bot.send_message(chat_id, MSG_AI_UNCLEAR)
         return
 
-    qa_date = _clamp_date(result.date_iso)
-    if result.action == "transaction":
+    entries: list[dict] = []
+    if result.action == "multi":
+        for item in result.items or []:
+            item_data = await _resolve_item_data(session, user, item)
+            if item_data:
+                entries.append(item_data)
+        if not entries:
+            await bot.send_message(chat_id, MSG_AI_UNCLEAR)
+            return
+        settings_svc = SettingsService(session)
+        allowed, _ = can_add_transaction(
+            user, await settings_svc.payment_required(), await settings_svc.free_limit()
+        )
+        if not allowed:
+            await bot.send_message(chat_id, MSG_FREEMIUM_BLOCKED)
+            return
+    elif result.action == "transaction":
         if result.type is None:
             await bot.send_message(chat_id, MSG_AI_UNCLEAR)
             return
@@ -135,7 +174,7 @@ async def _handle_result(bot, chat_id: int, state, session, user: User, result,
         if not allowed:
             await bot.send_message(chat_id, MSG_FREEMIUM_BLOCKED)
             return
-        data = dict(
+        entries.append(dict(
             qa_action="transaction",
             qa_type=result.type,
             qa_amount=str(result.amount),
@@ -144,8 +183,8 @@ async def _handle_result(bot, chat_id: int, state, session, user: User, result,
             qa_wallet_id=wallet.id,
             qa_wallet_name=_name_with_icon(wallet),
             qa_note=result.note,
-            qa_date=qa_date,
-        )
+            qa_date=_clamp_date(result.date_iso),
+        ))
     else:  # transfer
         fw = await qa_ai.resolve_wallet(session, user.id, result.from_wallet_guess)
         tw = await qa_ai.resolve_wallet(session, user.id, result.to_wallet_guess)
@@ -161,16 +200,21 @@ async def _handle_result(bot, chat_id: int, state, session, user: User, result,
                 )
                 return
             tw = others[0]
-        data = dict(
+        entries.append(dict(
             qa_action="transfer",
             qa_amount=str(result.amount),
             qa_from_id=fw.id, qa_from_name=_name_with_icon(fw),
             qa_to_id=tw.id, qa_to_name=_name_with_icon(tw),
             qa_note=result.note,
-            qa_date=qa_date,
-        )
+            qa_date=_clamp_date(result.date_iso),
+        ))
 
-    data.update(qa_source=source, qa_source_file_id=source_file_id, msg_id=None)
+    total = len(entries)
+    for i, item in enumerate(entries, start=1):
+        item["qa_pos"], item["qa_total"] = i, total
+    data = dict(entries[0])
+    data.update(qa_queue=entries[1:], qa_source=source,
+                qa_source_file_id=source_file_id, msg_id=None)
     await state.set_state(QuickAddStates.awaiting_confirmation)
     await state.set_data(data)
     card_id = await edit_or_send(bot, chat_id, None, _card_text(data), _card_kb(data))
@@ -251,6 +295,16 @@ async def qa_save(cb: CallbackQuery, state, session, user: User):
             return await cb.answer()
         except ValidationError as e:
             return await cb.answer(f"⚠️ {e}", show_alert=True)
+        queue = data.get("qa_queue") or []
+        if queue:
+            # masih ada item berikutnya → tampilkan kartu berikutnya
+            next_item = queue[0]
+            await state.update_data(**next_item, qa_queue=queue[1:])
+            await _render_card(cb.message.bot, cb.message.chat.id, state)
+            await cb.answer(f"✅ Tersimpan ({data.get('qa_pos', 1)}/{data.get('qa_total', 1)})")
+            for alert in alerts:
+                await cb.message.answer(alert)
+            return
         await state.clear()
         draft_registry.unregister(user.id)
         label, icon = ("Pemasukan", "💰") if data["qa_type"] == "income" else ("Pengeluaran", "💸")
@@ -283,6 +337,24 @@ async def qa_save(cb: CallbackQuery, state, session, user: User):
 
 @router.callback_query(F.data == "qa:cancel")
 async def qa_cancel(cb: CallbackQuery, state, user: User):
+    await state.clear()
+    draft_registry.unregister(user.id)
+    await cb.message.edit_text("❌ Dibatalkan.")
+    await cb.answer()
+
+
+@router.callback_query(F.data == "qa:skip")
+async def qa_skip(cb: CallbackQuery, state, user: User):
+    """⏭️ Lewati item saat ini saja — lanjut ke item berikutnya di antrian multi."""
+    data = await state.get_data()
+    queue = data.get("qa_queue") or []
+    if queue:
+        next_item = queue[0]
+        await state.update_data(**next_item, qa_queue=queue[1:])
+        await _render_card(cb.message.bot, cb.message.chat.id, state)
+        await cb.answer(f"⏭️ Item {data.get('qa_pos', 1)} dilewati")
+        return
+    # antrian habis (item terakhir dilewati) → tidak ada yang tersisa
     await state.clear()
     draft_registry.unregister(user.id)
     await cb.message.edit_text("❌ Dibatalkan.")

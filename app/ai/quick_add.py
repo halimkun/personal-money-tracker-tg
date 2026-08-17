@@ -23,7 +23,7 @@ PENTING: Jangan menebak transaksi kalau pesannya BUKAN tentang keuangan (sapaan,
 
 Output HARUS berupa objek JSON dengan skema persis:
 {
-  "action": "transaction" | "transfer" | "unclear",
+  "action": "transaction" | "transfer" | "multi" | "unclear",
   "type": "income" | "expense",
   "amount": 25000,
   "category_guess": "Makan & Minum",
@@ -32,11 +32,16 @@ Output HARUS berupa objek JSON dengan skema persis:
   "to_wallet_guess": "GoPay",
   "note": "beli kopi di Indomaret",
   "date": "2026-08-16",
+  "items": [
+    {"type": "expense", "amount": 25000, "category_guess": "Makan & Minum",
+     "wallet_guess": "", "note": "2 kopi kenangan", "date": "2026-08-16"}
+  ],
   "confidence": "high" | "low"
 }
 
 Aturan:
 - "transaction" = uang masuk/keluar; "transfer" = uang hanya pindah antar wallet (kata kunci: transfer, pindah, move). Untuk transfer isi from_wallet_guess & to_wallet_guess.
+- "multi" = pesan berisi LEBIH DARI SATU transaksi terpisah (baris terpisah / beda merchant / daftar belanja). Isi "items" dengan SATU objek per transaksi (field per item: type, amount, category_guess, wallet_guess, note, date — aturan sama seperti transaksi tunggal). Field utama (type/amount/note/dst.) kosongkan (null/""). Keterangan waktu di luar daftar (mis. "kemarin" di baris pertama) berlaku untuk SEMUA item. Jangan pecah SATU transaksi jadi dua — "beli kopi dan roti 30rb" tetap SATU transaksi dengan note.
 - amount: angka Rupiah tanpa titik/koma. Pahami singkatan: 25rb = 25000, 2jt = 2000000, 5k = 5000.
 - Kalau ada beberapa angka (mis. "kopi kenangan 2 50000"): angka TERAKHIR adalah total transaksi; angka sebelumnya = jumlah barang, catat di note.
 - date: tanggal transaksi dalam format YYYY-MM-DD kalau user menyebut keterangan waktu. Hitung relatif terhadap "Waktu sekarang" yang diberikan di system prompt: kemarin = hari ini - 1 hari, besok = hari ini + 1, lusa = +2, "2 hari lalu" = -2, "minggu lalu" = -7, tanggal/bulan disebut ("17 agustus") = tanggal itu di tahun yang sama. Kalau TIDAK ada keterangan waktu sama sekali → "date": "". Keterangan waktu BUKAN alasan confidence "low" dan TIDAK perlu dimasukkan ke note.
@@ -51,7 +56,10 @@ Contoh pesan → jawaban benar (asumsi "Waktu sekarang" = 2026-08-17 06:30):
 2. "kopi kenangan 2 50000 kemarin" → {"action": "transaction", "type": "expense", "amount": 50000, "category_guess": "Makan & Minum", "wallet_guess": "", "from_wallet_guess": "", "to_wallet_guess": "", "note": "2 kopi kenangan", "date": "2026-08-16", "confidence": "high"}
 3. "gajian 5jt" → {"action": "transaction", "type": "income", "amount": 5000000, "category_guess": "Gaji", "wallet_guess": "", "from_wallet_guess": "", "to_wallet_guess": "", "note": "gajian", "date": "", "confidence": "high"}
 4. "transfer 100rb ke gopay" → {"action": "transfer", "type": null, "amount": 100000, "category_guess": "", "wallet_guess": "", "from_wallet_guess": "", "to_wallet_guess": "GoPay", "note": "transfer ke gopay", "date": "", "confidence": "high"}
-5. "halo" → {"action": "unclear", "type": null, "amount": null, "category_guess": "", "wallet_guess": "", "from_wallet_guess": "", "to_wallet_guess": "", "note": "", "date": "", "confidence": "low"}"""
+5. "halo" → {"action": "unclear", "type": null, "amount": null, "category_guess": "", "wallet_guess": "", "from_wallet_guess": "", "to_wallet_guess": "", "note": "", "date": "", "confidence": "low"}
+6. "kemarin
+kopi kenangan 2 50000
+KFC 2 60000" → {"action": "multi", "type": null, "amount": null, "category_guess": "", "wallet_guess": "", "from_wallet_guess": "", "to_wallet_guess": "", "note": "", "date": "", "items": [{"type": "expense", "amount": 50000, "category_guess": "Makan & Minum", "wallet_guess": "", "note": "2 kopi kenangan", "date": "2026-08-16"}, {"type": "expense", "amount": 60000, "category_guess": "Makan & Minum", "wallet_guess": "", "note": "2 KFC", "date": "2026-08-16"}], "confidence": "high"}"""
 
 
 def _system_prompt() -> str:
@@ -62,7 +70,7 @@ def _system_prompt() -> str:
 
 @dataclass
 class QuickAddResult:
-    action: str  # transaction | transfer | unclear
+    action: str  # transaction | transfer | multi | unclear
     type: str | None
     amount: Decimal | None
     category_guess: str | None
@@ -72,9 +80,12 @@ class QuickAddResult:
     note: str | None
     date_iso: str | None  # YYYY-MM-DD, None kalau tidak disebut
     confidence: str | None
+    items: list["QuickAddResult"] | None = None  # untuk action "multi"
 
     @property
     def is_unclear(self) -> bool:
+        if self.action == "multi":
+            return not self.items
         if self.action not in ("transaction", "transfer") or self.confidence == "low":
             return True
         if self.amount is None:
@@ -111,7 +122,8 @@ def _parse_date(raw) -> str | None:
         return None
 
 
-async def _parse_result(data: dict) -> QuickAddResult:
+def _parse_flat(data: dict) -> QuickAddResult:
+    """Parsing satu objek (transaksi tunggal / satu item)."""
     action = str(data.get("action", "unclear")).strip().lower()
     type_ = str(data.get("type") or "").strip().lower()
     if type_ not in ("income", "expense"):
@@ -134,6 +146,19 @@ async def _parse_result(data: dict) -> QuickAddResult:
         date_iso=_parse_date(data.get("date")),
         confidence=str(data.get("confidence") or "low").strip().lower(),
     )
+
+
+async def _parse_result(data: dict) -> QuickAddResult:
+    result = _parse_flat(data)
+    if result.action == "multi":
+        items = [_parse_flat({**it, "action": "transaction"})
+                 for it in (data.get("items") or []) if isinstance(it, dict)]
+        valid = [it for it in items if it.type and it.amount]
+        if not valid:
+            result.action = "unclear"  # tidak ada item yang valid → tolak
+        else:
+            result.items = valid
+    return result
 
 
 async def parse_text(session: AsyncSession, user_id: int, text: str) -> QuickAddResult:

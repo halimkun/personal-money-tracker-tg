@@ -62,14 +62,20 @@ def wallet_list_kb(wallets, select_prefix: str, show_balance: bool = False,
 
 # -- Quick-add card -----------------------------------------------------------
 
-def quick_add_card_kb(kind: str) -> InlineKeyboardMarkup:
-    """Kartu konfirmasi quick-add (PRD §5.1b poin 5)."""
+def quick_add_card_kb(kind: str, *, multi: bool = False) -> InlineKeyboardMarkup:
+    """Kartu konfirmasi quick-add (PRD §5.1b poin 5).
+
+    multi=True → tambah tombol ⏭️ Lewati (batalkan item ini saja,
+    ❌ Batal tetap membatalkan seluruh antrian).
+    """
     rows: list[list[tuple[str, str]]] = []
     if kind == "transaction":
         rows.append([("✏️ Ubah Kategori", "qa:cat"), ("✏️ Ubah Wallet", "qa:wal")])
     else:
         rows.append([("✏️ Ubah Dari", "qa:from"), ("✏️ Ubah Ke", "qa:to")])
     rows.append([("✏️ Ubah Jumlah", "qa:amt"), ("✏️ Ubah Catatan", "qa:note")])
+    if multi:
+        rows.append([("⏭️ Lewati Item", "qa:skip")])
     rows.append([("✅ Simpan", "qa:save"), ("❌ Batal", "qa:cancel")])
     return ikb(rows)
 
