@@ -29,3 +29,8 @@ dev = [
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["."]
+
+[tool.uv]
+# Aplikasi (bukan package) — uv sync hanya install dependencies,
+# tidak install project itu sendiri. Penting untuk build Docker.
+package = false

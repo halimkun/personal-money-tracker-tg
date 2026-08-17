@@ -1,22 +1,67 @@
-# Stack lokal untuk development / E2E test:
-#   docker compose up -d
-# Lalu set DATABASE_URL & REDIS_URL di .env sesuai service di bawah.
+# Stack lengkap: bot + PostgreSQL + Redis.
+#
+# Persiapan:
+#   cp .env.example .env     # isi BOT_TOKEN (minimal) & ADMIN_IDS
+#   docker compose up -d --build
+#   docker compose logs -f bot
+#
+# Migrasi Alembic berjalan otomatis setiap bot start (entrypoint).
+# Port postgres/redis tidak dibuka ke host — bot mengakses lewat jaringan
+# internal compose. Kalau bot dijalankan dari host (uv) sementara DB/Redis
+# dari compose, uncomment bagian `ports:` di bawah.
+# Kredensial DB diatur via POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB —
+# dipakai otomatis oleh bot dan postgres sekaligus supaya selalu sinkron.
+
 services:
+  bot:
+    build: .
+    restart: unless-stopped
+    init: true
+    env_file: .env
+    environment:
+      # Override DATABASE_URL/REDIS_URL dari .env supaya menunjuk service
+      # di dalam compose, bukan localhost.
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-moneybot}:${POSTGRES_PASSWORD:-moneybot}@postgres:5432/${POSTGRES_DB:-moneybot}
+      REDIS_URL: redis://redis:6379/0
+      TIMEZONE: ${TIMEZONE:-Asia/Jakarta}
+      TZ: ${TZ:-Asia/Jakarta}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
   postgres:
     image: postgres:16-alpine
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: moneybot
-      POSTGRES_PASSWORD: moneybot
-      POSTGRES_DB: moneybot
-    ports:
-      - "5432:5432"
+      POSTGRES_USER: ${POSTGRES_USER:-moneybot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-moneybot}
+      POSTGRES_DB: ${POSTGRES_DB:-moneybot}
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # ports:
+    #   - "5432:5432"
 
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    # ports:
+    #   - "6379:6379"
 
 volumes:
   pgdata:
+  redisdata:

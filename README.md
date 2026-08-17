@@ -91,21 +91,29 @@ cp .env.example .env          # lalu isi BOT_TOKEN & ADMIN_IDS minimal
 ### Database
 
 **Dev (tanpa Docker)** — default `sqlite+aiosqlite:///bot.db`, tidak perlu setup apa pun.
+Migrasi: `uv run alembic upgrade head` (sekali, atau tiap ada versi baru).
 
-**Produksi (PostgreSQL 16 + Redis)**:
+**Produksi — full Docker (PostgreSQL 16 + Redis + bot)**: lihat bagian 🐳 Docker di bawah.
+
+**Bot di host + DB dari compose** (dev dengan Postgres): uncomment `ports:` di
+`docker-compose.yml`, jalankan `docker compose up -d postgres redis`, dan di `.env`:
+`DATABASE_URL=postgresql+asyncpg://moneybot:moneybot@localhost:5432/moneybot`,
+`REDIS_URL=redis://localhost:6379/0`.
+
+### 🐳 Docker (full stack)
 
 ```bash
-docker compose up -d        # Postgres 16 + Redis 7
-# .env:
-#   DATABASE_URL=postgresql+asyncpg://moneybot:moneybot@localhost:5432/moneybot
-#   REDIS_URL=redis://localhost:6379/0
+cp .env.example .env       # isi BOT_TOKEN & ADMIN_IDS minimal
+docker compose up -d --build
+docker compose logs -f bot
 ```
 
-Lalu jalankan migrasi (wajib, sekali saja):
-
-```bash
-uv run alembic upgrade head
-```
+- `bot` — image dari `Dockerfile` (uv, cache layer), migrasi Alembic otomatis saat start
+- `postgres:16-alpine` — data di volume `pgdata`
+- `redis:7-alpine` — FSM storage (state bertahan saat restart), data di volume `redisdata`
+- `DATABASE_URL`/`REDIS_URL` otomatis di-override menunjuk service di dalam compose
+- Kredensial DB: `POSTGRES_USER`/`POSTGRES_PASSWORD`/`POSTGRES_DB` (default `moneybot`)
+- Bot restart otomatis (`restart: unless-stopped`)
 
 ### Menjalankan bot
 
@@ -130,7 +138,7 @@ Siapkan 2 akun Telegram: **User** + **Admin** (ID di `ADMIN_IDS`).
 
 **1. Onboarding & wallet**
 - [ ] `/start` → bot menanya nama → tanya tipe wallet → minta saldo awal → selesai
-- [ ] `/start` kedua kali (kembali setelah selesai) → langsung `/help`, tidak setup ulang
+- [ ] `/start` kedua kali (kembali setelah selesai) → langsung view ringkasan + tombol 🏠 Menu, tidak setup ulang
 
 **2. Transaksi manual**
 - [ ] `/catat` → pilih Pemasukan → jumlah `25.500` (dan coba format `25k`, `25 rb`, salah: `abc`) → pilih wallet → kategori → catatan (Lewati juga dicoba) → kartu konfirmasi → Simpan
@@ -204,7 +212,7 @@ uv run pytest -q              # 50 test: domain murni, services, AI (mock), smok
 2. **JSONB/TEXT[] → JSON** — `keywords` kategori disimpan sebagai JSON list agar satu skema jalan di kedua database. Migrasi Alembic sudah memakai tipe yang sama (diverifikasi `alembic revision --autogenerate` menghasilkan diff kosong).
 3. **MemoryStorage fallback** — Redis dipakai bila `REDIS_URL` diisi (PRD §8); tanpa Redis, FSM memakai `MemoryStorage` (cukup untuk dev, state hilang saat restart — dikembalikan lewat `/cancel`).
 4. **Monetisasi Opsi A saja** (pembayaran manual + approval admin) sesuai PRD §5.3; Midtrans/Opsi B tidak diimplementasikan.
-5. **Datetime naive UTC** di DB; konversi zona waktu lokal (`TZ`, default Asia/Jakarta) di lapisan presentasi/domain.
+5. **Datetime naive UTC** di DB; konversi zona waktu lokal (`TIMEZONE`, default Asia/Jakarta) di lapisan presentasi/domain.
 
 ## 🔒 Keamanan
 

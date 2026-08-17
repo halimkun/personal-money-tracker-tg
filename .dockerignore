@@ -1,0 +1,24 @@
+# VCS & tooling lokal
+.git
+.claude
+.gitignore
+
+# Python lokal
+.venv
+__pycache__
+*.py[co]
+.pytest_cache
+.coverage
+htmlcov
+
+# Secret & data lokal — TIDAK boleh masuk image
+.env
+*.db
+*.sqlite3
+
+# Hanya untuk dev/test, tidak dipakai saat runtime
+tests
+scripts
+PRD_Bot_Keuangan_Telegram.md
+README.md
+docker-compose.yml
