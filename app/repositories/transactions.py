@@ -13,6 +13,23 @@ def _dec(value: Any) -> Decimal:
     return Decimal(str(value or 0))
 
 
+def _available_months_stmt(user_id: int):
+    """Query bulan-bulan (tahun, bulan) yang punya transaksi.
+
+    Portable SQLite & PostgreSQL: memakai EXTRACT (bukan strftime yang
+    hanya ada di SQLite). SQLAlchemy mengompilasi EXTRACT ke
+    CAST(STRFTIME(...)) di SQLite dan EXTRACT(... FROM ...) di PostgreSQL.
+    """
+    year_expr = func.extract("year", Transaction.occurred_at)
+    month_expr = func.extract("month", Transaction.occurred_at)
+    return (
+        select(year_expr, month_expr)
+        .where(Transaction.user_id == user_id)
+        .group_by(year_expr, month_expr)
+        .order_by(year_expr.desc(), month_expr.desc())
+    )
+
+
 class TransactionRepo(BaseRepo):
     async def get_for_user(self, tx_id: int, user_id: int) -> Transaction | None:
         return await self.s.scalar(
@@ -159,16 +176,8 @@ class TransactionRepo(BaseRepo):
         Dipakai pemilih "bulan spesifik" di /ringkasan — hanya bulan
         yang punya data yang ditawarkan.
         """
-        month_expr = func.strftime("%Y-%m", Transaction.occurred_at)
-        rows = (
-            await self.s.execute(
-                select(month_expr)
-                .where(Transaction.user_id == user_id)
-                .group_by(month_expr)
-                .order_by(month_expr.desc())
-            )
-        ).scalars().all()
-        return [(int(v[:4]), int(v[5:7])) for v in rows]
+        rows = (await self.s.execute(_available_months_stmt(user_id))).all()
+        return [(int(y), int(m)) for y, m in rows]
 
     async def count_all(self, user_id: int | None = None) -> int:
         q = select(func.count()).select_from(Transaction)

@@ -39,6 +39,23 @@ class TestReportHelpers:
         user = await make_user(session)
         assert await TransactionRepo(session).available_months(user.id) == []
 
+    def test_available_months_sql_portable(self):
+        """Query bulan spesifik harus terkompilasi di SQLite DAN PostgreSQL
+        (regresi: strftime tidak ada di PostgreSQL)."""
+        from sqlalchemy.dialects import postgresql, sqlite
+
+        from app.repositories.transactions import _available_months_stmt
+
+        stmt = _available_months_stmt(1)
+
+        pg_sql = str(stmt.compile(dialect=postgresql.dialect()))
+        assert "strftime" not in pg_sql.lower()
+        assert "extract" in pg_sql.lower()
+
+        sqlite_sql = str(stmt.compile(dialect=sqlite.dialect()))
+        assert "extract" not in sqlite_sql.lower()  # dikompilasi jadi strftime
+        assert "strftime" in sqlite_sql.lower()
+
     async def test_build_range_summary(self, session):
         user = await make_user(session)
         w = await make_wallet(session, user.id)
