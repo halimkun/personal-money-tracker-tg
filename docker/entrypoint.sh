@@ -2,6 +2,6 @@
 # Migrasi database dulu (idempoten) sebelum bot mulai.
 set -e
 
-python -m alembic upgrade head
+alembic upgrade head
 
 exec "$@"

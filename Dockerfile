@@ -15,6 +15,10 @@ ENV UV_COMPILE_BYTECODE=1 \
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev
 
+# Arahkan PATH ke .venv project supaya `python`/`alembic` memakai environment
+# yang berisi dependencies (bukan python bawaan image).
+ENV PATH="/app/.venv/bin:$PATH"
+
 # 2) Baru kode aplikasi + migrasi + entrypoint
 COPY main.py alembic.ini ./
 COPY app ./app
