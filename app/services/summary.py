@@ -3,7 +3,7 @@
 Transfer antar wallet TIDAK ikut laporan income/expense (tabel terpisah — PRD §4).
 """
 
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -43,6 +43,32 @@ class SummaryService:
             "tx_count": tx_count,
             "by_category": by_category[:8],
             "prev_income": prev_income,
+            "prev_expense": prev_expense,
+        }
+
+    async def build_range_summary(self, user_id: int, start: date, end: date) -> dict:
+        """Ringkasan untuk rentang tanggal bebas (mis. N bulan terakhir).
+
+        Perbandingan "periode sebelumnya" = rentang sama panjang tepat sebelum start.
+        """
+        repo = TransactionRepo(self.s)
+        income, expense = await repo.totals(user_id, start, end)
+        by_category = await repo.category_breakdown(user_id, start, end)
+        tx_count = await repo.count_in_window(user_id, start, end)
+
+        length = (end - start).days + 1
+        prev_start = start - timedelta(days=length)
+        prev_end = start - timedelta(days=1)
+        _, prev_expense = await repo.totals(user_id, prev_start, prev_end)
+
+        return {
+            "start": start,
+            "end": end,
+            "income": income,
+            "expense": expense,
+            "net": income - expense,
+            "tx_count": tx_count,
+            "by_category": by_category[:8],
             "prev_expense": prev_expense,
         }
 

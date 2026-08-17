@@ -153,6 +153,23 @@ class TransactionRepo(BaseRepo):
             or 0
         )
 
+    async def available_months(self, user_id: int) -> list[tuple[int, int]]:
+        """Bulan-bulan (tahun, bulan) yang punya transaksi, terbaru dulu.
+
+        Dipakai pemilih "bulan spesifik" di /ringkasan — hanya bulan
+        yang punya data yang ditawarkan.
+        """
+        month_expr = func.strftime("%Y-%m", Transaction.occurred_at)
+        rows = (
+            await self.s.execute(
+                select(month_expr)
+                .where(Transaction.user_id == user_id)
+                .group_by(month_expr)
+                .order_by(month_expr.desc())
+            )
+        ).scalars().all()
+        return [(int(v[:4]), int(v[5:7])) for v in rows]
+
     async def count_all(self, user_id: int | None = None) -> int:
         q = select(func.count()).select_from(Transaction)
         if user_id:

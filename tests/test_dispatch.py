@@ -602,3 +602,110 @@ class TestDispatch:
         async with session_factory() as s:
             txs = (await s.execute(select(Transaction))).scalars().all()
         assert len(txs) == 0
+
+    # ==================== Laporan 3 level (/ringkasan → 📊 Laporan) ====================
+
+    async def test_report_menu_3_level(self, app_dispatcher, session_factory, monkeypatch):
+        """Laporan: /ringkasan → 📊 Laporan → Rentang → 3 Bulan; Spesifik → tahun → bulan."""
+        from datetime import timedelta
+
+        from app.utils.format import today_local
+        from tests.conftest import make_category, make_tx
+
+        today = today_local()
+        this_month = today
+        two_months_ago = (today - timedelta(days=62)).replace(day=10)
+        eight_months_ago = (today - timedelta(days=250)).replace(day=20)
+
+        dp, storage = app_dispatcher
+        dp["session_factory"] = session_factory
+        async with session_factory() as s:
+            u = await make_user(s, tg_id=123)
+            w = await make_wallet(s, u.id)
+            c = await make_category(s, None)
+            await make_tx(s, u.id, w.id, c.id, amount="25000", occurred_at=this_month)
+            await make_tx(s, u.id, w.id, c.id, amount="15000", occurred_at=two_months_ago)
+            await make_tx(s, u.id, w.id, c.id, amount="50000", occurred_at=eight_months_ago)
+            await s.commit()
+        bot = await make_bot(monkeypatch)
+        ctx = FSMContext(storage=storage, key=StorageKey(bot_id=bot.id, chat_id=123, user_id=123))
+        await ctx.clear()
+
+        def press(i: int, data: str):
+            cb = CallbackQuery(
+                id=str(i),
+                from_user=TgUser(id=123, is_bot=False, first_name="Tester"),
+                chat_instance="ci",
+                message=make_msg(123, 123, "junk"),
+                data=data,
+            )
+            return dp.feed_update(bot, Update(update_id=i, callback_query=cb))
+
+        await dp.feed_update(bot, Update(update_id=1, message=make_msg(123, 123, "/ringkasan")))
+
+        # level 1: ringkasan default + tombol 📊 Laporan
+        sent = api_calls(SendMessage)
+        assert any("Hari Ini" in (m.text or "") for m in sent)
+        assert any("📊 Laporan" in (b.text for row in sent[-1].reply_markup.inline_keyboard for b in row)
+                   for m in sent if m.reply_markup)
+
+        # level 2: menu laporan
+        await press(2, "rep:menu")
+        edits = api_calls(EditMessageText)
+        assert any("Pilih jenis laporan" in (m.text or "") for m in edits)
+
+        # level 3a: rentang → 3 bulan terakhir (bulan ini + 2 sebelumnya)
+        await press(3, "rep:range")
+        edits = api_calls(EditMessageText)
+        assert any("Pilih rentang waktu" in (m.text or "") for m in edits)
+        await press(4, "rep:r:3")
+        edits = api_calls(EditMessageText)
+        rep = next(m for m in edits if "Rentang 3 Bulan Terakhir" in (m.text or ""))
+        assert "Rp 40.000" in rep.text  # 25000 + 15000; tx 8 bulan lalu di luar
+        assert "2 transaksi" in rep.text
+
+        # level 3b: spesifik → tahun → bulan (sesuai data yang ada)
+        await press(5, "rep:spec")
+        edits = api_calls(EditMessageText)
+        year_picker = next(m for m in edits if "Pilih tahun" in (m.text or ""))
+        old_year = eight_months_ago.year
+        assert any(b.callback_data == f"rep:y:{old_year}"
+                   for row in year_picker.reply_markup.inline_keyboard for b in row)
+
+        await press(6, f"rep:y:{old_year}")
+        edits = api_calls(EditMessageText)
+        month_picker = next(m for m in edits if f"Pilih Bulan — {old_year}" in (m.text or ""))
+        old_month = eight_months_ago.month
+        assert any(b.callback_data == f"rep:m:{old_year:04d}-{old_month:02d}"
+                   for row in month_picker.reply_markup.inline_keyboard for b in row)
+
+        await press(7, f"rep:m:{old_year:04d}-{old_month:02d}")
+        edits = api_calls(EditMessageText)
+        from app.handlers.summary import MONTHS_FULL
+        month_rep = next(m for m in edits if f"{MONTHS_FULL[old_month - 1]} {old_year}" in (m.text or ""))
+        assert "Rp 50.000" in month_rep.text
+        assert "1 transaksi" in month_rep.text
+
+    async def test_report_specific_empty(self, app_dispatcher, session_factory, monkeypatch):
+        """Spesifik tanpa data transaksi → pesan belum ada data + tombol kembali."""
+        dp, storage = app_dispatcher
+        dp["session_factory"] = session_factory
+        async with session_factory() as s:
+            await make_user(s, tg_id=123)
+            await s.commit()
+        bot = await make_bot(monkeypatch)
+        ctx = FSMContext(storage=storage, key=StorageKey(bot_id=bot.id, chat_id=123, user_id=123))
+        await ctx.clear()
+
+        await dp.feed_update(bot, Update(update_id=1, message=make_msg(123, 123, "/ringkasan")))
+        cb = CallbackQuery(
+            id="2",
+            from_user=TgUser(id=123, is_bot=False, first_name="Tester"),
+            chat_instance="ci",
+            message=make_msg(123, 123, "junk"),
+            data="rep:spec",
+        )
+        await dp.feed_update(bot, Update(update_id=2, callback_query=cb))
+
+        edits = api_calls(EditMessageText)
+        assert any("Belum ada data transaksi" in (m.text or "") for m in edits)

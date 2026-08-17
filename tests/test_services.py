@@ -19,6 +19,46 @@ from tests.conftest import make_category, make_tx, make_user, make_wallet
 D = date(2026, 8, 10)
 
 
+class TestReportHelpers:
+    async def test_available_months(self, session):
+        from app.repositories.transactions import TransactionRepo
+
+        user = await make_user(session)
+        w = await make_wallet(session, user.id)
+        c = await make_category(session, None)
+        await make_tx(session, user.id, w.id, c.id, occurred_at=date(2026, 8, 10))
+        await make_tx(session, user.id, w.id, c.id, occurred_at=date(2026, 5, 2))
+        await make_tx(session, user.id, w.id, c.id, occurred_at=date(2026, 5, 20))
+        await make_tx(session, user.id, w.id, c.id, occurred_at=date(2024, 6, 20))
+        months = await TransactionRepo(session).available_months(user.id)
+        assert months == [(2026, 8), (2026, 5), (2024, 6)]  # unik + terbaru dulu
+
+    async def test_available_months_empty(self, session):
+        from app.repositories.transactions import TransactionRepo
+
+        user = await make_user(session)
+        assert await TransactionRepo(session).available_months(user.id) == []
+
+    async def test_build_range_summary(self, session):
+        user = await make_user(session)
+        w = await make_wallet(session, user.id)
+        c = await make_category(session, None)
+        await make_tx(session, user.id, w.id, c.id, amount="10000",
+                      occurred_at=date(2026, 8, 1))
+        await make_tx(session, user.id, w.id, c.id, type_="income", amount="20000",
+                      occurred_at=date(2026, 7, 15))
+        await make_tx(session, user.id, w.id, c.id, amount="5000",
+                      occurred_at=date(2026, 6, 30))
+        data = await SummaryService(session).build_range_summary(
+            user.id, date(2026, 7, 1), date(2026, 8, 31)
+        )
+        assert data["start"] == date(2026, 7, 1)
+        assert data["end"] == date(2026, 8, 31)
+        assert data["income"] == Decimal("20000")
+        assert data["expense"] == Decimal("10000")  # tx Juni di luar jendela
+        assert data["tx_count"] == 2
+
+
 class TestWalletBalance:
     async def test_balance_on_the_fly(self, session):
         """Saldo = initial + income − expense − transfer_out + transfer_in."""
