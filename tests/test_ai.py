@@ -126,6 +126,37 @@ class TestParseText:
         assert result.type is None
 
 
+class TestClampDate:
+    """Validasi tanggal AI: struk lama (sampai 10 tahun) diterima,
+    tanggal halusinasi keterlaluan ditolak."""
+
+    def test_old_receipt_date_kept(self):
+        from app.handlers.quick_add import _clamp_date
+
+        assert _clamp_date("2024-06-20") == "2024-06-20"  # struk 2 tahun lalu
+
+    def test_nine_years_ago_kept(self):
+        from datetime import timedelta
+
+        from app.handlers.quick_add import _clamp_date
+        from app.utils.format import today_local
+
+        d = (today_local() - timedelta(days=9 * 365)).isoformat()
+        assert _clamp_date(d) == d
+
+    def test_absurd_future_rejected(self):
+        from app.handlers.quick_add import _clamp_date
+
+        assert _clamp_date("3000-01-01") is None
+
+    def test_invalid_rejected(self):
+        from app.handlers.quick_add import _clamp_date
+
+        assert _clamp_date("kemarin") is None
+        assert _clamp_date("") is None
+        assert _clamp_date(None) is None
+
+
 class TestResolve:
     async def test_resolve_category_by_name(self, session):
         user = await make_user(session)

@@ -57,6 +57,20 @@ class TestFormatRupiah:
         assert format_rupiah(Decimal("0")) == "Rp 0"
 
 
+class TestFmtDateCtx:
+    def test_same_year_no_year_suffix(self):
+        from app.utils.format import fmt_date_ctx, today_local
+
+        d = date(today_local().year, 6, 20)
+        assert fmt_date_ctx(d) == "20 Jun"
+
+    def test_different_year_shows_year(self):
+        from app.utils.format import fmt_date_ctx, today_local
+
+        y = today_local().year - 2
+        assert fmt_date_ctx(date(y, 6, 20)) == f"20 Jun {y}"
+
+
 class TestPeriods:
     def test_month_window(self):
         assert month_window(date(2026, 8, 16)) == (date(2026, 8, 1), date(2026, 8, 31))

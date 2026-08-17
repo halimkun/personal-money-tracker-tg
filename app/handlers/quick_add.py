@@ -35,7 +35,7 @@ from app.services.settings import SettingsService
 from app.services.transactions import TransactionService
 from app.services.transfers import TransferService
 from app.texts.id import MSG_AI_FAIL, MSG_AI_LIMIT, MSG_AI_UNCLEAR, MSG_FREEMIUM_BLOCKED
-from app.utils.format import fmt_date_short, now_utc_naive, today_local
+from app.utils.format import fmt_date_ctx, now_utc_naive, today_local
 from app.utils.messages import edit_or_send, render_step
 
 router = Router()
@@ -48,18 +48,22 @@ CAT_PER_PAGE = 10
 def _card_date(data: dict) -> str:
     """Tanggal kartu: dari AI (qa_date) atau 'Hari ini'."""
     qa_date = data.get("qa_date")
-    return fmt_date_short(date.fromisoformat(qa_date)) if qa_date else "Hari ini"
+    return fmt_date_ctx(date.fromisoformat(qa_date)) if qa_date else "Hari ini"
 
 
 def _clamp_date(date_iso: str | None) -> str | None:
-    """Validasi tanggal AI: ISO valid & maksimal ±365 hari dari hari ini."""
+    """Validasi tanggal AI: ISO valid & maksimal ±10 tahun dari hari ini.
+
+    10 tahun cukup lebar untuk struk lama ("20 Juni 2024"), tetap menolak
+    tanggal halusinasi yang keterlaluan (mis. tahun 3000 / tahun 1).
+    """
     if not date_iso:
         return None
     try:
         d = date.fromisoformat(date_iso)
     except ValueError:
         return None
-    if abs((d - today_local()).days) > 365:
+    if abs((d - today_local()).days) > 3650:
         return None
     return d.isoformat()
 

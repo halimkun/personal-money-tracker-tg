@@ -379,6 +379,53 @@ class TestDispatch:
         assert len(txs) == 1
         assert txs[0].occurred_at.isoformat() == yesterday
 
+    async def test_quick_add_ai_old_receipt_date(self, app_dispatcher, session_factory, monkeypatch):
+        """AI membaca tanggal struk lama (2024) → kartu & DB memakai tanggal itu,
+        bukan 'Hari ini' (clamp tidak membuang tanggal struk lama)."""
+        from sqlalchemy import select
+
+        from app.ai import client as ai_client
+        from app.db.models import Transaction
+
+        async def fake_complete_json(session, messages, *, temperature=0.0):
+            return {"action": "transaction", "type": "expense", "amount": 50000,
+                    "category_guess": "Makan & Minum", "wallet_guess": "",
+                    "note": "2 kopi kenangan", "date": "2024-06-20", "confidence": "high"}
+
+        monkeypatch.setattr(ai_client, "complete_json", fake_complete_json)
+
+        dp, storage = app_dispatcher
+        dp["session_factory"] = session_factory
+        async with session_factory() as s:
+            u = await make_user(s, tg_id=123)
+            await make_wallet(s, u.id)
+            await s.commit()
+        bot = await make_bot(monkeypatch)
+        ctx = FSMContext(storage=storage, key=StorageKey(bot_id=bot.id, chat_id=123, user_id=123))
+        await ctx.clear()
+
+        await dp.feed_update(bot, Update(update_id=1,
+                                         message=make_msg(123, 123, "kopi kenangan 2 50000")))
+        # jalur teks & foto struk sama-sama lewat _handle_result + _clamp_date
+        sent = api_calls(SendMessage)
+        card = next(m for m in sent if "Transaksi Terdeteksi" in (m.text or ""))
+        assert "20 Jun 2024" in card.text  # beda tahun → tahun ditampilkan
+        assert "Hari ini" not in card.text
+
+        cb = CallbackQuery(
+            id="1",
+            from_user=TgUser(id=123, is_bot=False, first_name="Tester"),
+            chat_instance="ci",
+            message=make_msg(123, 123, "junk"),
+            data="qa:save",
+        )
+        await dp.feed_update(bot, Update(update_id=2, callback_query=cb))
+
+        async with session_factory() as s:
+            txs = (await s.execute(select(Transaction))).scalars().all()
+        assert len(txs) == 1
+        assert txs[0].occurred_at.isoformat() == "2024-06-20"
+
     async def test_quick_add_multi_items_queue(self, app_dispatcher, session_factory, monkeypatch):
         """Pesan multi-item → kartu per item berurutan (1/2 → 2/2), semua tersimpan."""
         from sqlalchemy import select

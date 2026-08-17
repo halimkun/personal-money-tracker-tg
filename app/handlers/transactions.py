@@ -27,7 +27,7 @@ from app.services.errors import FreemiumBlockedError, ValidationError
 from app.services.settings import SettingsService
 from app.services.transactions import TransactionService
 from app.texts.id import MSG_FREEMIUM_BLOCKED
-from app.utils.format import fmt_date_short, today_local
+from app.utils.format import fmt_date_ctx, fmt_date_short, today_local
 from app.utils.messages import confirm_step, edit_or_send, render_step
 
 router = Router()
@@ -76,7 +76,7 @@ async def _tx_summary(data: dict) -> str:
         f"Jumlah: <b>{format_rupiah(Decimal(data['amount']))}</b>",
         f"Kategori: {data.get('category_name', '?')}",
         f"Wallet: {data.get('wallet_name', '?')}",
-        f"Tanggal: {fmt_date_short(d) if d else 'Hari ini'}",
+        f"Tanggal: {fmt_date_ctx(d) if d else 'Hari ini'}",
     ]
     if data.get("note"):
         lines.append(f"Catatan: {data['note']}")
@@ -260,7 +260,7 @@ async def _show_riwayat(bot, chat_id: int, message_id: int | None, session, user
     for tx, cat_name, cat_icon in rows:
         label, icon = TYPE_LABELS[tx.type]
         lines.append(
-            f"\n{fmt_date_short(tx.occurred_at)} — {cat_icon or ''} {cat_name} • "
+            f"\n{fmt_date_ctx(tx.occurred_at)} — {cat_icon or ''} {cat_name} • "
             f"{icon} <b>{format_rupiah(tx.amount)}</b>"
         )
         if tx.note:
@@ -347,7 +347,7 @@ async def hist_nav(cb: CallbackQuery, session, user: User):
         ])
         await cb.message.edit_text(
             f"🗑 Yakin hapus transaksi ini?\n\n"
-            f"{fmt_date_short(tx.occurred_at)} — <b>{format_rupiah(tx.amount)}</b>",
+            f"{fmt_date_ctx(tx.occurred_at)} — <b>{format_rupiah(tx.amount)}</b>",
             reply_markup=kb,
         )
     elif kind == "dely":  # hist:dely:{tx_id} — eksekusi
