@@ -16,6 +16,7 @@ def register_all_routers(dp: Dispatcher) -> None:
         common,
         export,
         insight,
+        menu,
         quick_add,
         settings,
         summary,
@@ -27,6 +28,7 @@ def register_all_routers(dp: Dispatcher) -> None:
 
     for module in (
         common,
+        menu,
         transactions,
         wallets,
         transfer,

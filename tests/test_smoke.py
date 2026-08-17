@@ -12,9 +12,9 @@ class TestAssembly:
         assert dp is not None
         assert isinstance(storage, MemoryStorage)
         assert "session_factory" in dp.workflow_data
-        # 13 router: common, transactions, wallets, transfer, categories, budgets,
+        # 14 router: common, menu, transactions, wallets, transfer, categories, budgets,
         # summary, insight, upgrade, export, settings, admin, quick_add
-        assert len(dp.sub_routers) == 13
+        assert len(dp.sub_routers) == 14
 
     def test_register_all_routers(self):
         assert callable(register_all_routers)

@@ -68,20 +68,26 @@ async def _render_report(bot, chat_id: int, message_id: int | None, data: dict,
 
 
 async def _render(bot, chat_id: int, message_id: int | None, session, user: User,
-                  period_type: str):
-    """Level 1: toggle periode berjalan + pintu masuk menu laporan."""
+                  period_type: str, *, with_menu_button: bool = False):
+    """Level 1: toggle periode berjalan + pintu masuk menu laporan.
+
+    with_menu_button=True → tambah tombol 🏠 Menu (dipakai /start supaya
+    view ringkasan juga jadi portal).
+    """
     data = await SummaryService(session).build_summary(user.id, period_type, today_local())
     from app.keyboards.inline import ikb
     marks = {ptype: ("✅ " if ptype == period_type else "") for ptype in PERIODS.values()}
-    kb = ikb([
+    rows = [
         [
             (f"{marks['day']}📅 Hari", "sum:d"),
             (f"{marks['week']}📆 Minggu", "sum:w"),
             (f"{marks['month']}🗓️ Bulan", "sum:m"),
         ],
         [("📊 Laporan", "rep:menu")],
-    ])
-    await _render_report(bot, chat_id, message_id, data, PERIOD_NAMES[period_type], kb)
+    ]
+    if with_menu_button:
+        rows.append([("🏠 Menu", "menu:back")])
+    await _render_report(bot, chat_id, message_id, data, PERIOD_NAMES[period_type], ikb(rows))
 
 
 @router.message(Command("ringkasan"))

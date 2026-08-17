@@ -15,20 +15,43 @@ WELCOME_WALLET_DONE = (
     "Lihat semua perintah: /help"
 )
 
-WELCOME_BACK = "👋 Halo lagi, {name}! Ketik /help untuk daftar perintah."
+# Command native Telegram (tombol ☰ di kolom chat) — disinkronkan saat bot start.
+BOT_COMMANDS = [
+    ("menu", "🏠 menu utama semua fitur"),
+    ("catat", "catat transaksi manual"),
+    ("riwayat", "lihat & edit/hapus transaksi"),
+    ("ringkasan", "laporan harian/mingguan/bulanan + rentang"),
+    ("wallet", "kelola wallet & lihat saldo"),
+    ("transfer", "transfer antar wallet"),
+    ("budget", "atur budget per kategori/total"),
+    ("kategori", "kelola kategori custom"),
+    ("insight", "insight keuangan dari AI"),
+    ("status", "status akun & saldo"),
+    ("upgrade", "upgrade ke premium"),
+    ("pengaturan", "setting personal (insight AI)"),
+    ("export", "export riwayat ke CSV"),
+    ("help", "bantuan & contoh pemakaian"),
+    ("cancel", "batalkan proses yang sedang berjalan"),
+]
 
-HELP_TEXT = """📖 <b>Daftar Perintah</b>
+HELP_TEXT = """🏠 <b>Menu utama</b>: /menu — semua fitur dalam satu tempat.
+Command juga muncul di tombol menu (☰) di kolom chat.
 
 💬 <b>Quick-add</b> — cukup ketik bebas atau kirim foto struk:
 • <i>beli kopi 25rb</i>
+• <i>kopi kenangan 2 50000 kemarin</i> ← tanggal otomatis
 • <i>gaji bulan ini masuk 5jt ke BCA</i>
 • <i>transfer 500rb dari cash ke gopay</i>
-• 📷 <i>kirim foto struk minimarket</i>
+• 📷 <i>kirim foto struk minimarket</i> — nominal & tanggal struk terbaca
+• Beberapa transaksi sekaligus (satu per baris):
+  <i>kemarin
+  kopi kenangan 2 50000
+  KFC 2 60000</i>
 
 <b>Command:</b>
 /catat — catat transaksi manual (step-by-step)
 /riwayat — lihat & edit/hapus transaksi
-/ringkasan — laporan harian/mingguan/bulanan
+/ringkasan — laporan hari/minggu/bulan + rentang & bulan spesifik
 /wallet — kelola wallet & lihat saldo
 /transfer — transfer antar wallet
 /budget — atur budget per kategori/total
@@ -36,7 +59,7 @@ HELP_TEXT = """📖 <b>Daftar Perintah</b>
 /insight — insight keuangan dari AI
 /status — status akun & saldo
 /upgrade — upgrade ke premium
-/pengaturan — setting personal (insight AI, wallet default)
+/pengaturan — setting personal (insight AI)
 /export — export riwayat ke CSV
 /cancel — batalkan proses yang sedang berjalan
 """

@@ -709,3 +709,122 @@ class TestDispatch:
 
         edits = api_calls(EditMessageText)
         assert any("Belum ada data transaksi" in (m.text or "") for m in edits)
+
+    # ==================== Portal menu utama (/menu) ====================
+
+    async def test_menu_hub_and_views(self, app_dispatcher, session_factory, monkeypatch):
+        """/menu → hub semua fitur; tombol view me-render di pesan hub (in-place)."""
+        from tests.conftest import make_category, make_tx
+
+        dp, storage = app_dispatcher
+        dp["session_factory"] = session_factory
+        async with session_factory() as s:
+            u = await make_user(s, tg_id=123)
+            w = await make_wallet(s, u.id)
+            c = await make_category(s, None)
+            await make_tx(s, u.id, w.id, c.id)
+            await s.commit()
+        bot = await make_bot(monkeypatch)
+        ctx = FSMContext(storage=storage, key=StorageKey(bot_id=bot.id, chat_id=123, user_id=123))
+        await ctx.clear()
+
+        await dp.feed_update(bot, Update(update_id=1, message=make_msg(123, 123, "/menu")))
+
+        sent = api_calls(SendMessage)
+        hub = next(m for m in sent if "Menu Utama" in (m.text or ""))
+        assert "Test User" in hub.text  # header identitas user
+        assert "@tester" in hub.text
+        buttons = [b.text for row in hub.reply_markup.inline_keyboard for b in row]
+        for label in ("💸 Catat Transaksi", "📋 Riwayat", "📊 Laporan", "👛 Wallet",
+                      "🔄 Transfer", "🎯 Budget", "🏷️ Kategori", "🧠 Insight AI",
+                      "📈 Status", "💎 Upgrade Premium", "⚙️ Pengaturan",
+                      "📤 Export CSV", "📖 Bantuan"):
+            assert label in buttons
+
+        def press(i: int, data: str):
+            cb = CallbackQuery(
+                id=str(i),
+                from_user=TgUser(id=123, is_bot=False, first_name="Tester"),
+                chat_instance="ci",
+                message=make_msg(123, 123, "junk"),
+                data=data,
+            )
+            return dp.feed_update(bot, Update(update_id=i, callback_query=cb))
+
+        await press(2, "menu:go:riwayat")
+        edits = api_calls(EditMessageText)
+        assert any("Riwayat Transaksi" in (m.text or "") for m in edits)
+
+        await press(3, "menu:go:laporan")
+        edits = api_calls(EditMessageText)
+        assert any("Hari Ini" in (m.text or "") for m in edits)
+
+        await press(4, "menu:go:status")
+        edits = api_calls(EditMessageText)
+        assert any("Saldo" in (m.text or "") for m in edits)
+
+        await press(5, "menu:back")
+        edits = api_calls(EditMessageText)
+        assert any("Menu Utama" in (m.text or "") for m in edits)
+
+    async def test_menu_catat_starts_flow_as_new_message(self, app_dispatcher,
+                                                         session_factory, monkeypatch):
+        """Tombol alur (💸 Catat) dari hub → FSM mulai dengan pesan BARU."""
+        dp, storage = app_dispatcher
+        dp["session_factory"] = session_factory
+        async with session_factory() as s:
+            u = await make_user(s, tg_id=123)
+            await make_wallet(s, u.id)
+            await s.commit()
+        bot = await make_bot(monkeypatch)
+        ctx = FSMContext(storage=storage, key=StorageKey(bot_id=bot.id, chat_id=123, user_id=123))
+        await ctx.clear()
+
+        await dp.feed_update(bot, Update(update_id=1, message=make_msg(123, 123, "/menu")))
+        cb = CallbackQuery(
+            id="2",
+            from_user=TgUser(id=123, is_bot=False, first_name="Tester"),
+            chat_instance="ci",
+            message=make_msg(123, 123, "junk"),
+            data="menu:go:catat",
+        )
+        await dp.feed_update(bot, Update(update_id=2, callback_query=cb))
+
+        sent = api_calls(SendMessage)
+        assert any("Mau catat apa" in (m.text or "") for m in sent)  # prompt FSM pesan baru
+        await ctx.clear()  # jangan bocorkan state FSM ke test lain
+
+    async def test_start_existing_user_opens_summary_with_menu_button(self, app_dispatcher,
+                                                                      session_factory, monkeypatch):
+        """/start user lama → view ringkasan (sama dengan /ringkasan) + tombol 🏠 Menu."""
+        dp, storage = app_dispatcher
+        dp["session_factory"] = session_factory
+        async with session_factory() as s:
+            await make_user(s, tg_id=123)
+            await s.commit()
+        bot = await make_bot(monkeypatch)
+        ctx = FSMContext(storage=storage, key=StorageKey(bot_id=bot.id, chat_id=123, user_id=123))
+        await ctx.clear()
+
+        await dp.feed_update(bot, Update(update_id=1, message=make_msg(123, 123, "/start")))
+
+        sent = api_calls(SendMessage)
+        view = next(m for m in sent if "Hari Ini" in (m.text or ""))
+        buttons = [b.text for row in view.reply_markup.inline_keyboard for b in row]
+        assert any(b.endswith("📅 Hari") for b in buttons)  # periode aktif ada tanda ✅
+        assert "📆 Minggu" in buttons and "🗓️ Bulan" in buttons
+        assert "📊 Laporan" in buttons
+        assert "🏠 Menu" in buttons  # tombol tambahan ke menu utama
+        assert not any("Halo lagi" in (m.text or "") for m in sent)
+
+        # tekan 🏠 Menu → portal menu utama terbuka (di tempat)
+        cb = CallbackQuery(
+            id="2",
+            from_user=TgUser(id=123, is_bot=False, first_name="Tester"),
+            chat_instance="ci",
+            message=make_msg(123, 123, "junk"),
+            data="menu:back",
+        )
+        await dp.feed_update(bot, Update(update_id=2, callback_query=cb))
+        edits = api_calls(EditMessageText)
+        assert any("Menu Utama" in (m.text or "") for m in edits)

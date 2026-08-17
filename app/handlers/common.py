@@ -8,7 +8,7 @@ from aiogram.types import Message
 from app.handlers.states import WalletStates
 from app.scheduler.drafts import draft_registry
 from app.services.users import UserService
-from app.texts.id import HELP_TEXT, WELCOME_BACK, WELCOME_NEW
+from app.texts.id import HELP_TEXT, WELCOME_NEW
 from app.utils.messages import render_step
 
 router = Router()
@@ -20,8 +20,10 @@ async def cmd_start(message: Message, state, session):
     user, is_new = await UserService(session).register(tg.id, tg.username, tg.full_name)
 
     if not is_new:
-        await message.answer(WELCOME_BACK.format(name=user.full_name or tg.first_name or ""))
-        await message.answer(await UserService(session).build_status_text(user))
+        # user lama: view ringkasan (sama dengan /ringkasan) + tombol 🏠 Menu
+        from app.handlers import summary
+        await summary._render(message.bot, message.chat.id, None, session, user,
+                              "day", with_menu_button=True)
         return
 
     await message.answer(WELCOME_NEW)

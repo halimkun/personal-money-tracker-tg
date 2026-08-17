@@ -13,8 +13,7 @@ from app.utils.messages import edit_or_send
 router = Router()
 
 
-@router.message(Command("pengaturan"))
-async def cmd_pengaturan(message: Message, session, user: User):
+async def _render_menu(bot, chat_id: int, message_id: int | None, session, user: User):
     daily = await SettingsService(session).ai_daily_limit()
     lines = [
         "⚙️ <b>Pengaturan</b>",
@@ -26,9 +25,14 @@ async def cmd_pengaturan(message: Message, session, user: User):
     ]
     toggle_label = "🔴 Nonaktifkan Insight AI" if user.ai_insight_enabled else "🟢 Aktifkan Insight AI"
     await edit_or_send(
-        message.bot, message.chat.id, None, "\n".join(lines),
+        bot, chat_id, message_id, "\n".join(lines),
         ikb([[("🔄", "set:refresh"), (toggle_label, "set:tins")]]),
     )
+
+
+@router.message(Command("pengaturan"))
+async def cmd_pengaturan(message: Message, session, user: User):
+    await _render_menu(message.bot, message.chat.id, None, session, user)
 
 
 @router.callback_query(F.data == "set:refresh")
@@ -47,17 +51,5 @@ async def set_toggle_insight(cb: CallbackQuery, session, user: User):
 
 
 async def cmd_pengaturan_rerender(cb: CallbackQuery, session, user: User):
-    daily = await SettingsService(session).ai_daily_limit()
-    lines = [
-        "⚙️ <b>Pengaturan</b>",
-        "",
-        f"🧠 Insight AI bulanan: {'🟢 aktif' if user.ai_insight_enabled else '🔴 nonaktif'}",
-        f"💬 Kuota analisis AI harian: {daily} pesan/hari",
-        "",
-        "💡 Wallet default diatur dari menu /wallet (tombol ⭐).",
-    ]
-    toggle_label = "🔴 Nonaktifkan Insight AI" if user.ai_insight_enabled else "🟢 Aktifkan Insight AI"
-    await edit_or_send(
-        cb.message.bot, cb.message.chat.id, cb.message.message_id, "\n".join(lines),
-        ikb([[("🔄", "set:refresh"), (toggle_label, "set:tins")]]),
-    )
+    await _render_menu(cb.message.bot, cb.message.chat.id, cb.message.message_id,
+                       session, user)

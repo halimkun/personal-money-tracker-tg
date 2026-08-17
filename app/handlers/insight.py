@@ -16,16 +16,20 @@ from app.utils.messages import edit_or_send
 router = Router()
 
 
-@router.message(Command("insight"))
-async def cmd_insight(message: Message):
+async def _render_menu(bot, chat_id: int, message_id: int | None):
     await edit_or_send(
-        message.bot, message.chat.id, None,
+        bot, chat_id, message_id,
         "🧠 <b>Insight Keuangan AI</b>\n\n"
         "AI menganalisis pola pengeluaran bulan ini dari data agregat "
         "(tanpa membaca detail transaksi satu per satu) dan memberi saran.",
         ikb([[("✨ Buat Insight Bulan Ini", "ins:gen")],
              [("🗂️ Riwayat Insight", "ins:hist")]]),
     )
+
+
+@router.message(Command("insight"))
+async def cmd_insight(message: Message):
+    await _render_menu(message.bot, message.chat.id, None)
 
 
 @router.callback_query(F.data == "ins:gen")

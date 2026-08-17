@@ -56,9 +56,22 @@ async def on_startup() -> None:
     log.info("seed kategori global selesai")
 
 
+async def sync_bot_commands(bot: Bot) -> None:
+    """Daftarkan command native Telegram (tombol ☰ di kolom chat)."""
+    from aiogram.types import BotCommand
+
+    from app.texts.id import BOT_COMMANDS
+
+    await bot.set_my_commands(
+        [BotCommand(command=c, description=d) for c, d in BOT_COMMANDS]
+    )
+    log.info("command native Telegram disinkronkan (%d command)", len(BOT_COMMANDS))
+
+
 async def run_polling(bot: Bot, dp: Dispatcher, storage) -> None:
     await bot.delete_webhook(drop_pending_updates=True)
     await on_startup()
+    await sync_bot_commands(bot)
     scheduler = AsyncIOScheduler(timezone=settings.timezone)
     from app.scheduler.jobs import setup_scheduler
 
@@ -73,6 +86,7 @@ async def run_webhook(bot: Bot, dp: Dispatcher, storage) -> None:
     from aiohttp import web
 
     await on_startup()
+    await sync_bot_commands(bot)
     scheduler = AsyncIOScheduler(timezone=settings.timezone)
     from app.scheduler.jobs import setup_scheduler
 
