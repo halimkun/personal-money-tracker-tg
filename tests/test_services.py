@@ -39,6 +39,34 @@ class TestReportHelpers:
         user = await make_user(session)
         assert await TransactionRepo(session).available_months(user.id) == []
 
+
+class TestAdminFks:
+    """Regresi: admin_logs.admin_id & payments.approved_by menyimpan
+    telegram_id, jadi FK-nya harus menunjuk users.telegram_id (bukan
+    users.id). SQLite dev tidak menegakkan FK — PostgreSQL menegakkan."""
+
+    def test_fk_targets_telegram_id(self):
+        from app.db.models import AdminLog, Payment
+
+        for table in (AdminLog.__table__, Payment.__table__):
+            column = "admin_id" if table.name == "admin_logs" else "approved_by"
+            fks = list(table.c[column].foreign_keys)
+            assert len(fks) == 1
+            target = next(iter(fks)).column
+            assert (target.table.name, target.name) == ("users", "telegram_id")
+
+    async def test_settings_set_logs_by_telegram_id(self, session):
+        from sqlalchemy import select
+
+        from app.db.models import AdminLog
+
+        user = await make_user(session, tg_id=444060895)
+        await SettingsService(session).set("payment_required", "true",
+                                           admin_id=user.telegram_id)
+        rows = (await session.execute(select(AdminLog))).scalars().all()
+        assert len(rows) == 1
+        assert rows[0].admin_id == user.telegram_id  # bukan surrogate user.id
+
     def test_available_months_sql_portable(self):
         """Query bulan spesifik harus terkompilasi di SQLite DAN PostgreSQL
         (regresi: strftime tidak ada di PostgreSQL)."""

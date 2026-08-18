@@ -139,7 +139,7 @@ class Payment(Base):
     status: Mapped[str] = mapped_column(String(10), default="pending")  # pending|approved|rejected
     method: Mapped[str] = mapped_column(String(50), default="manual")
     proof_file_id: Mapped[str | None] = mapped_column(Text)
-    approved_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"))
+    approved_by: Mapped[int | None] = mapped_column(ForeignKey("users.telegram_id"))  # telegram_id admin
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
     approved_at: Mapped[datetime | None] = mapped_column(DateTime)
 
@@ -158,7 +158,7 @@ class AdminLog(Base):
     __tablename__ = "admin_logs"
 
     id: Mapped[int] = mapped_column(BigIntPK, primary_key=True, autoincrement=True)
-    admin_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    admin_id: Mapped[int] = mapped_column(ForeignKey("users.telegram_id"))  # telegram_id admin
     action: Mapped[str] = mapped_column(String(100))
     detail: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
